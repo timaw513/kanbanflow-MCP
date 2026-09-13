@@ -1,10 +1,10 @@
 {
   "manifest_version": "0.3",
   "name": "kanbanflow-mcp-server",
-  "display_name": "KanbanFlow MCP Server",
-  "version": "1.1.0",
-  "description": "MCP server for KanbanFlow - manage boards, tasks, and workflows. Fork adds groupingDate support to create-task/update-task.",
-  "long_description": "Model Context Protocol (MCP) server for KanbanFlow - manage boards, tasks, and workflows from Claude. This is a local fork of William Holmberg's kanbanflow-mcp-server (MIT licensed) with one addition: the create-task and update-task tools now accept an optional groupingDate parameter (YYYY-MM-DD, or null/empty string for unknown date), matching KanbanFlow's own Create Task API. This only has a visible effect on columns configured as 'date grouped' in KanbanFlow.",
+  "display_name": "KanbanFlow MCP Server (multi-board)",
+  "version": "2.0.0",
+  "description": "Multi-board KanbanFlow MCP server: every tool takes board_name, resolved via a boards.json config file. Covers ~30 tools (tasks, subtasks, labels, dates, comments, time entries, custom fields, users, board management) plus groupingDate support.",
+  "long_description": "Model Context Protocol (MCP) server for KanbanFlow, rebuilt from William Holmberg's kanbanflow-mcp-server (MIT licensed) into a multi-board server matching the local setup already in use: a boards.json config file (default ~/.kanbanflow/boards.json, override with KANBANFLOW_BOARDS_CONFIG) lists { name, token, boardId } entries, one per KanbanFlow board (KanbanFlow API tokens are per-board). Every tool takes a board_name parameter to pick which board it acts on. Adds list_boards/add_board/remove_board/sync_board_ids to manage that config, move_task_to_board to move a task between configured boards, and full coverage of tasks, subtasks, labels, dates, collaborators, comments, attachments, relations, custom fields, users, board events, time entries (manual/board/task), and CSV bulk-import. create_task/update_task/move_task_to_board also accept an optional groupingDate (YYYY-MM-DD, or null/empty for unknown date) matching KanbanFlow's own API - only meaningful on a column configured as date grouped. Authenticates with Bearer tokens per KanbanFlow's current API docs; verified end-to-end against the live API before packaging.",
   "author": {
     "name": "Tim Williams",
     "email": "tim@developmentconsultingpartners.com"
@@ -31,17 +31,17 @@
       "command": "node",
       "args": ["${__dirname}/build/index.js"],
       "env": {
-        "KANBAN_API_TOKEN": "${user_config.kanban_api_token}"
+        "KANBANFLOW_BOARDS_CONFIG": "${user_config.boards_config_path}"
       }
     }
   },
   "user_config": {
-    "kanban_api_token": {
+    "boards_config_path": {
       "type": "string",
-      "title": "KanbanFlow API Token",
-      "description": "Your KanbanFlow API token, from kanbanflow.com/api",
-      "required": true,
-      "sensitive": true
+      "title": "Boards config file path (optional)",
+      "description": "Path to your boards.json file listing { name, token, boardId } per KanbanFlow board. Leave blank to use the default location: ~/.kanbanflow/boards.json. Use the list_boards/add_board tools from within Claude to manage it instead of editing it by hand.",
+      "required": false,
+      "sensitive": false
     }
   },
   "compatibility": {

@@ -1,7 +1,7 @@
 {
     "name": "kanbanflow-mcp-server",
-    "version": "1.0.3",
-    "description": "Model Context Protocol (MCP) server for KanbanFlow - manage boards, tasks, and workflows from Cursor/Claude",
+    "version": "2.0.0",
+    "description": "Multi-board Model Context Protocol (MCP) server for KanbanFlow - manage multiple boards, tasks, and workflows from Claude via a board_name parameter and a boards.json config file",
     "main": "build/index.js",
     "type": "module",
     "bin": {
@@ -16,10 +16,7 @@
     "files": [
         "build",
         "README.md",
-        "LICENSE",
-        "mcp.config.example.json",
-        "mcp.config.global.example.json",
-        "mcp.config.local.example.json"
+        "LICENSE"
     ],
     "keywords": [
         "mcp",
@@ -45,12 +42,10 @@
     "dependencies": {
         "@modelcontextprotocol/sdk": "^1.4.0",
         "axios": "^1.7.9",
-        "prompts": "^2.4.2",
         "zod": "^3.23.8"
     },
     "devDependencies": {
         "@types/node": "^22.10.0",
-        "@types/prompts": "^2.4.9",
         "typescript": "^5.7.2"
     }
 }

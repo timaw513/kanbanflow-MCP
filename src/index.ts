@@ -1,228 +1,381 @@
 #!/usr/bin/env node
-// Environment variables are provided by MCP client (Cursor)
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { KanbanService } from "./kanbanflow/kanban-service.js";
-import { Board, Column } from "./kanbanflow/types.js";
-import prompts from "prompts";
 import fs from "fs/promises";
-import path from "path";
-import { fileURLToPath } from "url";
+import { BoardRegistry } from "./kanbanflow/board-registry.js";
+import * as kanban from "./kanbanflow/kanban-service.js";
+import { Board, Column, Swimlane, KanbanTask, TaskColor } from "./kanbanflow/types.js";
+import { BOARDS_CONFIG_PATH } from "./kanbanflow/config.js";
 
-const kanbanService = new KanbanService();
+const registry = new BoardRegistry();
 
-// Create server instance
 const server = new McpServer({
     name: "kanban-flow",
-    version: "1.0.0",
+    version: "2.0.0",
 });
 
-// Helper function to format board response
-function formatBoard(board: Board) {
-    return {
-        name: board.name,
-        columns: board.columns.map((col: Column) => ({
-            name: col.name,
-            id: col.uniqueId,
-        })),
-    };
+// ---------- helpers ----------
+
+const boardNameParam = z.string().describe("Name of the configured board to operate on (see list_boards)");
+const colorEnum = z.enum(['yellow', 'white', 'red', 'green', 'blue', 'purple', 'orange', 'cyan', 'brown', 'magenta']);
+const groupingDateParam = z.string().nullable().optional().describe("Only used if the target column is date grouped. Format YYYY-MM-DD, e.g. 2023-12-31. Use null or empty string to group as unknown date.");
+
+function text(t: string) {
+    return { content: [{ type: "text" as const, text: t }] };
 }
 
-// Register Kanban Flow tools
+function errorText(action: string, error: any) {
+    return text(`Failed to ${action}: ${error.message || error}`);
+}
+
+function formatBoard(board: Board) {
+    const lines: string[] = [];
+    lines.push(`Board: ${board.name} [ID: ${board._id}]`);
+    lines.push(`Columns:`);
+    board.columns.forEach((col: Column) => lines.push(`  - ${col.name} [ID: ${col.uniqueId}]`));
+    if (board.swimlanes && board.swimlanes.length > 0) {
+        lines.push(`Swimlanes:`);
+        board.swimlanes.forEach((sl: Swimlane) => lines.push(`  - ${sl.name} [ID: ${sl.uniqueId}]`));
+    }
+    if (board.colors && board.colors.length > 0) {
+        lines.push(`Colors: ${board.colors.map(c => c.value).join(', ')}`);
+    }
+    return lines.join('\n');
+}
+
+function formatTaskLine(task: KanbanTask, index?: number): string {
+    let line = index !== undefined ? `${index + 1}. ` : '- ';
+    line += task.name;
+    if (task.color) line += ` [${task.color.toUpperCase()}]`;
+    if (task.number) line += ` (${task.number.prefix || ''}${task.number.value})`;
+    if (task.description) line += ` - ${task.description.substring(0, 100)}${task.description.length > 100 ? '...' : ''}`;
+    line += ` [ID: ${task._id}]`;
+    return line;
+}
+
+function formatTaskDetails(task: KanbanTask): string {
+    let out = `Task Details:\n`;
+    out += `- ID: ${task._id}\n`;
+    out += `- Name: ${task.name}\n`;
+    out += `- Column ID: ${task.columnId}\n`;
+    if (task.swimlaneId) out += `- Swimlane ID: ${task.swimlaneId}\n`;
+    if (task.description) out += `- Description: ${task.description}\n`;
+    if (task.color) out += `- Color: ${task.color}\n`;
+    if (task.position !== undefined) out += `- Position: ${task.position}\n`;
+    if (task.number) out += `- Number: ${task.number.prefix || ''}${task.number.value}\n`;
+    if (task.responsibleUserId) out += `- Responsible User: ${task.responsibleUserId}\n`;
+    if (task.totalSecondsSpent) out += `- Time Spent: ${task.totalSecondsSpent} seconds\n`;
+    if (task.totalSecondsEstimate) out += `- Time Estimate: ${task.totalSecondsEstimate} seconds\n`;
+    if (task.pointsEstimate) out += `- Points Estimate: ${task.pointsEstimate}\n`;
+    if (task.groupingDate) out += `- Grouping Date: ${task.groupingDate}\n`;
+    if (task.subTasks && task.subTasks.length > 0) {
+        out += `- Subtasks (${task.subTasks.length}):\n`;
+        task.subTasks.forEach((s: any, i: number) => out += `  ${i + 1}. ${s.finished ? '✅' : '⬜'} ${s.name || 'Unnamed'}\n`);
+    }
+    if (task.labels && task.labels.length > 0) {
+        out += `- Labels: ${task.labels.map((l: any) => l.name).join(', ')}\n`;
+    }
+    if (task.dates && task.dates.length > 0) {
+        out += `- Dates: ${task.dates.length} date(s) set\n`;
+    }
+    return out;
+}
+
+/** Minimal CSV line parser supporting quoted fields with embedded commas/quotes. */
+function parseCsv(content: string): Record<string, string>[] {
+    const rows: string[][] = [];
+    let row: string[] = [];
+    let field = '';
+    let inQuotes = false;
+    for (let i = 0; i < content.length; i++) {
+        const c = content[i];
+        if (inQuotes) {
+            if (c === '"') {
+                if (content[i + 1] === '"') { field += '"'; i++; }
+                else inQuotes = false;
+            } else field += c;
+        } else {
+            if (c === '"') inQuotes = true;
+            else if (c === ',') { row.push(field); field = ''; }
+            else if (c === '\n' || c === '\r') {
+                if (c === '\r' && content[i + 1] === '\n') i++;
+                row.push(field); field = '';
+                if (row.length > 1 || row[0] !== '') rows.push(row);
+                row = [];
+            } else field += c;
+        }
+    }
+    if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row); }
+    if (rows.length === 0) return [];
+    const header = rows[0].map(h => h.trim());
+    return rows.slice(1).map(r => {
+        const obj: Record<string, string> = {};
+        header.forEach((h, i) => obj[h] = (r[i] ?? '').trim());
+        return obj;
+    });
+}
+
+// ---------- board / config management ----------
 
 server.tool(
-    "get-board",
-    "Get Kanban board structure",
+    "list_boards",
+    "List all configured KanbanFlow board names. API tokens are never exposed.",
     {},
     async () => {
         try {
-            const board = await kanbanService.getBoard();
-            const formattedBoard = formatBoard(board);
-
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: `Board: ${formattedBoard.name}\n\nColumns:\n${formattedBoard.columns
-                            .map((col) => `- ${col.name} (ID: ${col.id})`)
-                            .join("\n")}`,
-                    },
-                ],
-            };
+            const boards = await registry.listBoards();
+            if (boards.length === 0) {
+                return text(`No boards configured yet. Config file: ${BOARDS_CONFIG_PATH}\nUse add_board to add one.`);
+            }
+            return text(`Configured boards:\n${boards.map(b => `- ${b.name} (boardId: ${b.boardId})`).join('\n')}`);
         } catch (error: any) {
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: `Failed to get board: ${error.message}`,
-                    },
-                ],
-            };
+            return errorText("list boards", error);
         }
     }
 );
 
 server.tool(
-    "create-task",
+    "add_board",
+    "Add a new board to the config by name and API token. Fetches the board to confirm the token works and to capture its board ID.",
+    {
+        name: z.string().describe("A short name you'll use to refer to this board in other tool calls"),
+        token: z.string().describe("KanbanFlow API token for this board (Settings > API & Webhooks)"),
+    },
+    async ({ name, token }) => {
+        try {
+            const entry = await registry.addBoard(name, token);
+            return text(`Added board "${entry.name}" (boardId: ${entry.boardId}) to ${BOARDS_CONFIG_PATH}`);
+        } catch (error: any) {
+            return errorText("add board", error);
+        }
+    }
+);
+
+server.tool(
+    "remove_board",
+    "Remove a configured board by name.",
+    { board_name: boardNameParam },
+    async ({ board_name }) => {
+        try {
+            await registry.removeBoard(board_name);
+            return text(`Removed board "${board_name}" from ${BOARDS_CONFIG_PATH}`);
+        } catch (error: any) {
+            return errorText("remove board", error);
+        }
+    }
+);
+
+server.tool(
+    "sync_board_ids",
+    "Re-fetch one (or all, if board_name omitted) configured board(s) from KanbanFlow and update the stored board ID if it changed.",
+    { board_name: z.string().optional().describe("Board to sync; omit to sync all configured boards") },
+    async ({ board_name }) => {
+        try {
+            const results = await registry.syncBoardIds(board_name);
+            const lines = results.map(r =>
+                r.error
+                    ? `- ${r.name}: ERROR - ${r.error}`
+                    : `- ${r.name}: ${r.changed ? `boardId changed ${r.oldBoardId} -> ${r.newBoardId}` : `unchanged (${r.newBoardId})`}`
+            );
+            return text(`Sync results:\n${lines.join('\n')}`);
+        } catch (error: any) {
+            return errorText("sync board ids", error);
+        }
+    }
+);
+
+// ---------- board ----------
+
+server.tool(
+    "get_board",
+    "Get full board details: columns, swimlanes, colors, settings.",
+    { board_name: boardNameParam },
+    async ({ board_name }) => {
+        try {
+            const client = await registry.getClient(board_name);
+            const board = await kanban.getBoard(client);
+            return text(formatBoard(board));
+        } catch (error: any) {
+            return errorText("get board", error);
+        }
+    }
+);
+
+server.tool(
+    "get_board_custom_fields",
+    "Get the custom field definitions available on the board.",
+    { board_name: boardNameParam },
+    async ({ board_name }) => {
+        try {
+            const client = await registry.getClient(board_name);
+            const fields = await kanban.getBoardCustomFields(client);
+            if (fields.length === 0) return text("No custom fields defined on this board.");
+            return text(fields.map(f => `- ${f.name} [ID: ${f._id}] (${f.fieldType})`).join('\n'));
+        } catch (error: any) {
+            return errorText("get board custom fields", error);
+        }
+    }
+);
+
+server.tool(
+    "get_board_events",
+    "Get board-level events (audit log) within an optional time window.",
+    {
+        board_name: boardNameParam,
+        from: z.string().optional().describe("Start timestamp, ISO 8601 or epoch ms"),
+        to: z.string().optional().describe("End timestamp, ISO 8601 or epoch ms"),
+        limit: z.number().optional().describe("Max events to return (default/max 100)"),
+        order: z.enum(['ascending', 'descending']).optional(),
+    },
+    async ({ board_name, from, to, limit, order }) => {
+        try {
+            const client = await registry.getClient(board_name);
+            const events = await kanban.getBoardEvents(client, from, to, limit, order);
+            if (events.length === 0) return text("No events found in that window.");
+            return text(events.map(e => `- ${e.timestamp}: ${e.eventType}${e.taskId ? ` (task ${e.taskId})` : ''}`).join('\n'));
+        } catch (error: any) {
+            return errorText("get board events", error);
+        }
+    }
+);
+
+server.tool(
+    "get_users",
+    "Get all users who have access to the board.",
+    { board_name: boardNameParam },
+    async ({ board_name }) => {
+        try {
+            const client = await registry.getClient(board_name);
+            const users = await kanban.getUsers(client);
+            return text(users.map(u => `- ${u.fullName} <${u.email}> [ID: ${u._id}]`).join('\n') || "No users found.");
+        } catch (error: any) {
+            return errorText("get users", error);
+        }
+    }
+);
+
+// ---------- tasks ----------
+
+server.tool(
+    "create_task",
     "Create a new task on the board",
     {
+        board_name: boardNameParam,
         name: z.string().describe("Name of the task"),
-        columnId: z.string().describe("ID of the column to create the task in"),
-        description: z.string().optional().describe("Optional task description"),
-        groupingDate: z.string().nullable().optional().describe("Only used if the target column is date grouped. Format YYYY-MM-DD, e.g. 2023-12-31. Use null or empty string to group as unknown date."),
+        column_id: z.string().describe("ID of the column to create the task in"),
+        swimlane_id: z.string().optional().describe("ID of the swimlane (required if the board has swimlanes)"),
+        description: z.string().optional(),
+        color: colorEnum.optional(),
+        position: z.union([z.string(), z.number()]).optional(),
+        totalSecondsEstimate: z.number().optional(),
+        pointsEstimate: z.number().optional(),
+        groupingDate: groupingDateParam,
     },
-    async ({ name, columnId, description, groupingDate }) => {
+    async ({ board_name, name, column_id, swimlane_id, description, color, position, totalSecondsEstimate, pointsEstimate, groupingDate }) => {
         try {
-            const task = await kanbanService.createTask({
+            const client = await registry.getClient(board_name);
+            const task = await kanban.createTask(client, {
                 name,
-                columnId,
+                columnId: column_id,
+                swimlaneId: swimlane_id,
                 description,
+                color,
+                position,
+                totalSecondsEstimate,
+                pointsEstimate,
                 groupingDate,
             });
-
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: `Successfully created task!\nTask ID: ${task.taskId}`,
-                    },
-                ],
-            };
+            return text(`Successfully created task!\nTask ID: ${task.taskId}`);
         } catch (error: any) {
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: `Failed to create task: ${error.message}`,
-                    },
-                ],
-            };
+            return errorText("create task", error);
         }
     }
 );
 
 server.tool(
-    "get-tasks",
-    "Get all tasks in a column",
-    {
-        columnId: z.string().describe("ID of the column to get tasks from"),
-    },
-    async ({ columnId }) => {
-        try {
-            const tasks = await kanbanService.getTasksByColumnId(columnId);
-
-            const formattedTasks = tasks.map(task => 
-                `- ${task.name}${task.description ? ` (${task.description})` : ''} [ID: ${task._id}]`
-            ).join('\n');
-
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: tasks.length > 0 
-                            ? `Tasks in column:\n${formattedTasks}`
-                            : "No tasks found in this column",
-                    },
-                ],
-            };
-        } catch (error: any) {
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: `Failed to get tasks: ${error.message}`,
-                    },
-                ],
-            };
-        }
-    }
-);
-
-server.tool(
-    "get-task-details",
+    "get_task",
     "Get detailed information about a specific task by its ID",
     {
-        taskId: z.string().describe("ID of the task to get details for"),
-        includePosition: z.boolean().optional().describe("Whether to include task position in column"),
+        board_name: boardNameParam,
+        task_id: z.string(),
+        includePosition: z.boolean().optional(),
     },
-    async ({ taskId, includePosition }) => {
+    async ({ board_name, task_id, includePosition }) => {
         try {
-            const task = await kanbanService.getTaskDetails(taskId, includePosition);
-
-            // Format task details for display
-            let formattedDetails = `Task Details:\n`;
-            formattedDetails += `- ID: ${task._id}\n`;
-            formattedDetails += `- Name: ${task.name}\n`;
-            formattedDetails += `- Column ID: ${task.columnId}\n`;
-            
-            if (task.description) formattedDetails += `- Description: ${task.description}\n`;
-            if (task.color) formattedDetails += `- Color: ${task.color}\n`;
-            if (task.position) formattedDetails += `- Position: ${task.position}\n`;
-            if (task.number) formattedDetails += `- Number: ${task.number.prefix || ''}${task.number.value}\n`;
-            if (task.responsibleUserId) formattedDetails += `- Responsible User: ${task.responsibleUserId}\n`;
-            if (task.totalSecondsSpent) formattedDetails += `- Time Spent: ${task.totalSecondsSpent} seconds\n`;
-            if (task.totalSecondsEstimate) formattedDetails += `- Time Estimate: ${task.totalSecondsEstimate} seconds\n`;
-            if (task.pointsEstimate) formattedDetails += `- Points Estimate: ${task.pointsEstimate}\n`;
-            if (task.groupingDate) formattedDetails += `- Grouping Date: ${task.groupingDate}\n`;
-            
-            if (task.subTasks && task.subTasks.length > 0) {
-                formattedDetails += `- Subtasks (${task.subTasks.length}):\n`;
-                task.subTasks.forEach((subtask: any, index: number) => {
-                    formattedDetails += `  ${index + 1}. ${subtask.name || 'Unnamed subtask'}\n`;
-                });
-            }
-            
-            if (task.labels && task.labels.length > 0) {
-                formattedDetails += `- Labels: ${task.labels.map((label: any) => label.name).join(', ')}\n`;
-            }
-            
-            if (task.dates && task.dates.length > 0) {
-                formattedDetails += `- Dates: ${task.dates.length} date(s) set\n`;
-            }
-
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: formattedDetails,
-                    },
-                ],
-            };
+            const client = await registry.getClient(board_name);
+            const task = await kanban.getTaskById(client, task_id, includePosition);
+            return text(formatTaskDetails(task));
         } catch (error: any) {
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: `Failed to get task details: ${error.message}`,
-                    },
-                ],
-            };
+            return errorText("get task", error);
         }
     }
 );
 
 server.tool(
-    "update-task",
-    "Update properties of an existing task",
+    "get_tasks_by_column",
+    "Get tasks filtered by column ID. swimlane_id is optional.",
     {
-        taskId: z.string().describe("ID of the task to update"),
-        name: z.string().optional().describe("New task name"),
-        columnId: z.string().optional().describe("ID of the column to move the task to"),
-        description: z.string().optional().describe("New task description"),
-        color: z.enum(['yellow', 'white', 'red', 'green', 'blue', 'purple', 'orange', 'cyan', 'brown', 'magenta']).optional().describe("New task color"),
-        position: z.union([z.string(), z.number()]).optional().describe("New position (number, 'top', or 'bottom')"),
-        responsibleUserId: z.string().optional().describe("ID of the user responsible for the task"),
-        totalSecondsEstimate: z.number().optional().describe("Estimated time in seconds"),
-        pointsEstimate: z.number().optional().describe("Points estimate for the task"),
-        groupingDate: z.string().nullable().optional().describe("Only used if the target column is date grouped. Format YYYY-MM-DD, e.g. 2023-12-31. Use null or empty string to group as unknown date."),
+        board_name: boardNameParam,
+        column_id: z.string(),
+        swimlane_id: z.string().optional(),
     },
-    async ({ taskId, name, columnId, description, color, position, responsibleUserId, totalSecondsEstimate, pointsEstimate, groupingDate }) => {
+    async ({ board_name, column_id, swimlane_id }) => {
         try {
-            // Build update object with only provided properties
+            const client = await registry.getClient(board_name);
+            const tasks = await kanban.getTasksByColumn(client, column_id, swimlane_id);
+            return text(tasks.length > 0 ? tasks.map((t, i) => formatTaskLine(t, i)).join('\n') : "No tasks found in this column.");
+        } catch (error: any) {
+            return errorText("get tasks by column", error);
+        }
+    }
+);
+
+server.tool(
+    "get_all_tasks",
+    "Get every task on a board.",
+    { board_name: boardNameParam },
+    async ({ board_name }) => {
+        try {
+            const client = await registry.getClient(board_name);
+            const columns = await kanban.getAllTasks(client);
+            let out = "";
+            for (const column of columns) {
+                out += `📂 ${column.columnName} (${column.tasks.length} tasks):\n`;
+                if (column.tasks.length === 0) out += "   (no tasks)\n";
+                else column.tasks.forEach((t, i) => out += `   ${formatTaskLine(t, i)}\n`);
+                if (column.tasksLimited) out += "   ⚠️ more tasks exist than shown (limited)\n";
+                out += "\n";
+            }
+            return text(out.trim());
+        } catch (error: any) {
+            return errorText("get all tasks", error);
+        }
+    }
+);
+
+server.tool(
+    "update_task",
+    "Update a task (name, description, color, column, position, estimates, grouping date).",
+    {
+        board_name: boardNameParam,
+        task_id: z.string(),
+        name: z.string().optional(),
+        column_id: z.string().optional().describe("Move task to this column ID"),
+        description: z.string().optional(),
+        color: colorEnum.optional(),
+        position: z.union([z.string(), z.number()]).optional(),
+        responsibleUserId: z.string().optional(),
+        totalSecondsEstimate: z.number().optional(),
+        pointsEstimate: z.number().optional(),
+        groupingDate: groupingDateParam,
+    },
+    async ({ board_name, task_id, name, column_id, description, color, position, responsibleUserId, totalSecondsEstimate, pointsEstimate, groupingDate }) => {
+        try {
+            const client = await registry.getClient(board_name);
             const updates: any = {};
             if (name !== undefined) updates.name = name;
-            if (columnId !== undefined) updates.columnId = columnId;
+            if (column_id !== undefined) updates.columnId = column_id;
             if (description !== undefined) updates.description = description;
             if (color !== undefined) updates.color = color;
             if (position !== undefined) updates.position = position;
@@ -231,763 +384,431 @@ server.tool(
             if (pointsEstimate !== undefined) updates.pointsEstimate = pointsEstimate;
             if (groupingDate !== undefined) updates.groupingDate = groupingDate;
 
-            await kanbanService.updateTask(taskId, updates);
-
-            // Fetch the updated task to return current state
-            const updatedTask = await kanbanService.getTaskDetails(taskId);
-
-            // Format response
-            let response = `Successfully updated task!\n`;
-            response += `- ID: ${updatedTask._id}\n`;
-            response += `- Name: ${updatedTask.name}\n`;
-            response += `- Column ID: ${updatedTask.columnId}\n`;
-            
-            if (updatedTask.description) response += `- Description: ${updatedTask.description}\n`;
-            if (updatedTask.color) response += `- Color: ${updatedTask.color}\n`;
-            if (updatedTask.position) response += `- Position: ${updatedTask.position}\n`;
-            if (updatedTask.groupingDate) response += `- Grouping Date: ${updatedTask.groupingDate}\n`;
-
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: response,
-                    },
-                ],
-            };
+            await kanban.updateTask(client, task_id, updates);
+            const updated = await kanban.getTaskById(client, task_id);
+            return text(`Successfully updated task!\n${formatTaskDetails(updated)}`);
         } catch (error: any) {
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: `Failed to update task: ${error.message}`,
-                    },
-                ],
-            };
+            return errorText("update task", error);
         }
     }
 );
 
 server.tool(
-    "get-all-tasks",
-    "Get all tasks from all columns on the board",
-    {},
-    async () => {
+    "delete_task",
+    "Permanently delete a task.",
+    { board_name: boardNameParam, task_id: z.string() },
+    async ({ board_name, task_id }) => {
         try {
-            const allTasksResponse = await kanbanService.getAllTasks();
+            const client = await registry.getClient(board_name);
+            await kanban.deleteTask(client, task_id);
+            return text(`Deleted task ${task_id}.`);
+        } catch (error: any) {
+            return errorText("delete task", error);
+        }
+    }
+);
 
-            // Format the response to show tasks organized by column
-            let formattedResponse = "All Tasks by Column:\n\n";
-            
-            for (const column of allTasksResponse) {
-                formattedResponse += `📂 **${column.columnName}** (${column.tasks.length} tasks):\n`;
-                
-                if (column.tasks.length === 0) {
-                    formattedResponse += "   - No tasks in this column\n";
-                } else {
-                    column.tasks.forEach((task, index) => {
-                        formattedResponse += `   ${index + 1}. ${task.name}`;
-                        if (task.color) formattedResponse += ` [${task.color.toUpperCase()}]`;
-                        if (task.description) formattedResponse += ` - ${task.description.substring(0, 100)}${task.description.length > 100 ? '...' : ''}`;
-                        formattedResponse += ` [ID: ${task._id}]\n`;
+server.tool(
+    "move_task_to_board",
+    "Move a task from one configured board to another (or another column/swimlane on a different board).",
+    {
+        board_name: boardNameParam.describe("The board the task currently lives on"),
+        task_id: z.string(),
+        target_board_name: z.string().describe("The configured board to move the task to"),
+        column_id: z.string().optional().describe("Target column ID; defaults to the target board's first column"),
+        swimlane_id: z.string().optional(),
+        groupingDate: groupingDateParam,
+    },
+    async ({ board_name, task_id, target_board_name, column_id, swimlane_id, groupingDate }) => {
+        try {
+            const client = await registry.getClient(board_name);
+            const targetEntry = await registry.getBoardEntry(target_board_name);
+            await kanban.moveTaskToBoard(client, task_id, targetEntry.boardId, targetEntry.token, {
+                columnId: column_id,
+                swimlaneId: swimlane_id,
+                groupingDate,
+            });
+            return text(`Moved task ${task_id} from "${board_name}" to "${target_board_name}".`);
+        } catch (error: any) {
+            return errorText("move task to another board", error);
+        }
+    }
+);
+
+// ---------- subtasks ----------
+
+server.tool(
+    "create_subtask",
+    "Add a subtask to an existing task.",
+    {
+        board_name: boardNameParam,
+        task_id: z.string(),
+        name: z.string(),
+        finished: z.boolean().optional(),
+        userId: z.string().optional(),
+        dueDateTimestamp: z.string().optional(),
+        dueDateTimestampLocal: z.string().optional(),
+    },
+    async ({ board_name, task_id, name, finished, userId, dueDateTimestamp, dueDateTimestampLocal }) => {
+        try {
+            const client = await registry.getClient(board_name);
+            const result = await kanban.createSubtask(client, task_id, { name, finished, userId, dueDateTimestamp, dueDateTimestampLocal });
+            return text(`Added subtask "${name}" at position ${result.insertIndex}.`);
+        } catch (error: any) {
+            return errorText("create subtask", error);
+        }
+    }
+);
+
+server.tool(
+    "get_subtasks",
+    "Get all subtasks for a task.",
+    { board_name: boardNameParam, task_id: z.string() },
+    async ({ board_name, task_id }) => {
+        try {
+            const client = await registry.getClient(board_name);
+            const subtasks = await kanban.getSubtasks(client, task_id);
+            if (subtasks.length === 0) return text("No subtasks.");
+            return text(subtasks.map((s, i) => `${i + 1}. ${s.finished ? '✅' : '⬜'} ${s.name}${s.userId ? ` (assigned: ${s.userId})` : ''}`).join('\n'));
+        } catch (error: any) {
+            return errorText("get subtasks", error);
+        }
+    }
+);
+
+// ---------- labels ----------
+
+server.tool(
+    "create_label",
+    "Add a label to a task.",
+    { board_name: boardNameParam, task_id: z.string(), name: z.string(), pinned: z.boolean().optional() },
+    async ({ board_name, task_id, name, pinned }) => {
+        try {
+            const client = await registry.getClient(board_name);
+            const result = await kanban.createLabel(client, task_id, { name, pinned });
+            return text(`Added label "${name}" at position ${result.insertIndex}.`);
+        } catch (error: any) {
+            return errorText("create label", error);
+        }
+    }
+);
+
+server.tool(
+    "get_labels",
+    "Get all labels on a task.",
+    { board_name: boardNameParam, task_id: z.string() },
+    async ({ board_name, task_id }) => {
+        try {
+            const client = await registry.getClient(board_name);
+            const labels = await kanban.getLabels(client, task_id);
+            if (labels.length === 0) return text("No labels.");
+            return text(labels.map(l => `- ${l.pinned ? '📌' : '🏷️'} ${l.name}`).join('\n'));
+        } catch (error: any) {
+            return errorText("get labels", error);
+        }
+    }
+);
+
+// ---------- dates ----------
+
+server.tool(
+    "set_date",
+    "Set or update the due date on a task. due_timestamp required (ISO 8601 UTC). due_timestamp_local and target_column_id optional.",
+    {
+        board_name: boardNameParam,
+        task_id: z.string(),
+        due_timestamp: z.string().describe("ISO 8601 UTC e.g. 2024-03-01T12:00:00Z"),
+        target_column_id: z.string(),
+        due_timestamp_local: z.string().optional().describe("ISO 8601 with offset e.g. 2024-03-01T13:00:00+01:00"),
+        dateType: z.string().optional(),
+        status: z.enum(['active', 'done']).optional(),
+    },
+    async ({ board_name, task_id, due_timestamp, target_column_id, due_timestamp_local, dateType, status }) => {
+        try {
+            const client = await registry.getClient(board_name);
+            await kanban.setDate(client, task_id, {
+                dueTimestamp: due_timestamp,
+                targetColumnId: target_column_id,
+                dueTimestampLocal: due_timestamp_local,
+                dateType,
+                status,
+            });
+            return text(`Set date on task ${task_id}: due ${due_timestamp}, target column ${target_column_id}.`);
+        } catch (error: any) {
+            return errorText("set date", error);
+        }
+    }
+);
+
+server.tool(
+    "get_dates",
+    "Get date/due-date information for a task.",
+    { board_name: boardNameParam, task_id: z.string() },
+    async ({ board_name, task_id }) => {
+        try {
+            const client = await registry.getClient(board_name);
+            const dates = await kanban.getDates(client, task_id);
+            if (dates.length === 0) return text("No dates set.");
+            return text(dates.map(d => `- ${d.dateType || 'date'}: due ${d.dueTimestamp} (target column ${d.targetColumnId}, status ${d.status})`).join('\n'));
+        } catch (error: any) {
+            return errorText("get dates", error);
+        }
+    }
+);
+
+// ---------- collaborators ----------
+
+server.tool(
+    "get_collaborators",
+    "Get collaborators on a task.",
+    { board_name: boardNameParam, task_id: z.string() },
+    async ({ board_name, task_id }) => {
+        try {
+            const client = await registry.getClient(board_name);
+            const collaborators = await kanban.getCollaborators(client, task_id);
+            if (collaborators.length === 0) return text("No collaborators.");
+            return text(collaborators.map(c => `- ${c.userId}`).join('\n'));
+        } catch (error: any) {
+            return errorText("get collaborators", error);
+        }
+    }
+);
+
+// ---------- comments ----------
+
+server.tool(
+    "add_comment",
+    "Add a comment to a task.",
+    {
+        board_name: boardNameParam,
+        task_id: z.string(),
+        text: z.string(),
+        authorUserId: z.string().optional(),
+        createdTimestamp: z.string().optional(),
+    },
+    async ({ board_name, task_id, text: commentText, authorUserId, createdTimestamp }) => {
+        try {
+            const client = await registry.getClient(board_name);
+            const result = await kanban.addComment(client, task_id, { text: commentText, authorUserId, createdTimestamp });
+            return text(`Added comment [ID: ${result.taskCommentId}].`);
+        } catch (error: any) {
+            return errorText("add comment", error);
+        }
+    }
+);
+
+server.tool(
+    "get_comments",
+    "Get comments on a task.",
+    { board_name: boardNameParam, task_id: z.string() },
+    async ({ board_name, task_id }) => {
+        try {
+            const client = await registry.getClient(board_name);
+            const comments = await kanban.getComments(client, task_id);
+            if (comments.length === 0) return text("No comments.");
+            return text(comments.map(c => `- [${c.createdTimestamp || '?'}] ${c.authorUserId || 'unknown'}: ${c.text}`).join('\n'));
+        } catch (error: any) {
+            return errorText("get comments", error);
+        }
+    }
+);
+
+// ---------- attachments ----------
+
+server.tool(
+    "get_attachments",
+    "Get attachments on a task.",
+    { board_name: boardNameParam, task_id: z.string() },
+    async ({ board_name, task_id }) => {
+        try {
+            const client = await registry.getClient(board_name);
+            const attachments = await kanban.getAttachments(client, task_id);
+            if (attachments.length === 0) return text("No attachments.");
+            return text(attachments.map(a => `- ${a.name} (${a.provider}, ${a.mimeType}, ${a.size}b) [ID: ${a._id}]\n  ${a.link}`).join('\n'));
+        } catch (error: any) {
+            return errorText("get attachments", error);
+        }
+    }
+);
+
+// ---------- relations ----------
+
+server.tool(
+    "get_relations",
+    "Get task relations (relatesTo/dependsOn/requiredBy).",
+    { board_name: boardNameParam, task_id: z.string() },
+    async ({ board_name, task_id }) => {
+        try {
+            const client = await registry.getClient(board_name);
+            const relations = await kanban.getRelations(client, task_id);
+            if (relations.length === 0) return text("No relations.");
+            return text(relations.map(r => `- ${r.relationType}: ${r.relatedTaskName} [ID: ${r.relatedTaskId}]${r.relatedTaskBoardId ? ` (board ${r.relatedTaskBoardId})` : ''}`).join('\n'));
+        } catch (error: any) {
+            return errorText("get relations", error);
+        }
+    }
+);
+
+// ---------- custom fields ----------
+
+server.tool(
+    "get_task_custom_fields",
+    "Get custom field values set on a task.",
+    { board_name: boardNameParam, task_id: z.string() },
+    async ({ board_name, task_id }) => {
+        try {
+            const client = await registry.getClient(board_name);
+            const fields = await kanban.getTaskCustomFields(client, task_id);
+            if (fields.length === 0) return text("No custom field values set.");
+            return text(fields.map(f => `- ${f.customFieldId}: ${f.value.text ?? f.value.number ?? ''}`).join('\n'));
+        } catch (error: any) {
+            return errorText("get task custom fields", error);
+        }
+    }
+);
+
+// ---------- time tracking ----------
+
+server.tool(
+    "add_manual_time_entry",
+    "Add a manual time entry to a task using ISO 8601 start and end timestamps.",
+    {
+        board_name: boardNameParam,
+        task_id: z.string(),
+        start_timestamp: z.string().describe("ISO 8601 UTC e.g. 2024-01-02T08:30:00Z"),
+        end_timestamp: z.string().describe("ISO 8601 UTC e.g. 2024-01-02T12:00:00Z"),
+        userId: z.string().optional(),
+        comment: z.string().optional().describe("Max 50 characters"),
+        labelNames: z.array(z.string()).optional(),
+    },
+    async ({ board_name, task_id, start_timestamp, end_timestamp, userId, comment, labelNames }) => {
+        try {
+            const client = await registry.getClient(board_name);
+            await kanban.addManualTimeEntry(client, task_id, {
+                startTimestamp: start_timestamp,
+                endTimestamp: end_timestamp,
+                userId,
+                comment,
+                labelNames,
+            });
+            return text(`Added manual time entry to task ${task_id}: ${start_timestamp} -> ${end_timestamp}.`);
+        } catch (error: any) {
+            return errorText("add manual time entry", error);
+        }
+    }
+);
+
+server.tool(
+    "get_manual_time_entries_for_task",
+    "Get manual time entries logged on a specific task.",
+    { board_name: boardNameParam, task_id: z.string() },
+    async ({ board_name, task_id }) => {
+        try {
+            const client = await registry.getClient(board_name);
+            const entries = await kanban.getManualTimeEntriesForTask(client, task_id);
+            if (entries.length === 0) return text("No manual time entries on this task.");
+            return text(entries.map(e => `- ${e.startTimestamp} -> ${e.endTimestamp}${e.comment ? ` (${e.comment})` : ''} [ID: ${e._id}]`).join('\n'));
+        } catch (error: any) {
+            return errorText("get manual time entries for task", error);
+        }
+    }
+);
+
+server.tool(
+    "get_time_entries_for_task",
+    "Get all time entries (manual, Pomodoro, Stopwatch) for a specific task within a time window.",
+    {
+        board_name: boardNameParam,
+        task_id: z.string(),
+        from: z.string().optional().describe("Start timestamp, ISO 8601 or epoch ms (from or to required)"),
+        to: z.string().optional().describe("End timestamp, ISO 8601 or epoch ms (from or to required)"),
+    },
+    async ({ board_name, task_id, from, to }) => {
+        try {
+            const client = await registry.getClient(board_name);
+            const entries = await kanban.getTimeEntriesForTask(client, task_id, from, to);
+            if (entries.length === 0) return text("No time entries found for this task in that window.");
+            return text(entries.map(e => `- [${e.type}] ${e.startTimestamp} -> ${e.endTimestamp || '(ongoing)'}${e.comment ? ` (${e.comment})` : ''}`).join('\n'));
+        } catch (error: any) {
+            return errorText("get time entries for task", error);
+        }
+    }
+);
+
+server.tool(
+    "get_time_entries_for_board",
+    "Get all time entries (manual, Pomodoro, Stopwatch) for the board within a time window.",
+    {
+        board_name: boardNameParam,
+        from: z.string().optional().describe("Start timestamp, ISO 8601 or epoch ms (from or to required)"),
+        to: z.string().optional().describe("End timestamp, ISO 8601 or epoch ms (from or to required)"),
+        userId: z.string().optional(),
+        limit: z.number().optional().describe("Max 1000, default 100"),
+    },
+    async ({ board_name, from, to, userId, limit }) => {
+        try {
+            const client = await registry.getClient(board_name);
+            const entries = await kanban.getTimeEntriesForBoard(client, from, to, userId, limit);
+            if (entries.length === 0) return text("No time entries found in that window.");
+            return text(entries.map(e => `- [${e.type}] task ${e.taskId}: ${e.startTimestamp} -> ${e.endTimestamp || '(ongoing)'}`).join('\n'));
+        } catch (error: any) {
+            return errorText("get time entries for board", error);
+        }
+    }
+);
+
+// ---------- bulk import ----------
+
+server.tool(
+    "import_csv",
+    "Bulk-create tasks on a board from CSV content. Required column: name. Optional columns: description, color, swimlaneId, position.",
+    {
+        board_name: boardNameParam,
+        column_id: z.string().describe("Column ID every row will be created in"),
+        csv_content: z.string().describe("Raw CSV text, first row = headers"),
+    },
+    async ({ board_name, column_id, csv_content }) => {
+        try {
+            const client = await registry.getClient(board_name);
+            const rows = parseCsv(csv_content);
+            if (rows.length === 0) return text("No data rows found in CSV.");
+            const created: string[] = [];
+            const failed: string[] = [];
+            for (const row of rows) {
+                if (!row.name) { failed.push(`(missing name) ${JSON.stringify(row)}`); continue; }
+                try {
+                    const task = await kanban.createTask(client, {
+                        name: row.name,
+                        columnId: column_id,
+                        description: row.description || undefined,
+                        color: (row.color as TaskColor) || undefined,
+                        swimlaneId: row.swimlaneId || undefined,
+                        position: row.position || undefined,
                     });
-                }
-                
-                if (column.tasksLimited) {
-                    formattedResponse += "   ⚠️ This column has more tasks (limited to 20)\n";
-                }
-                
-                formattedResponse += "\n";
-            }
-
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: formattedResponse,
-                    },
-                ],
-            };
-        } catch (error: any) {
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: `Failed to get all tasks: ${error.message}`,
-                    },
-                ],
-            };
-        }
-    }
-);
-
-server.tool(
-    "add-subtask",
-    "Add a subtask to an existing task",
-    {
-        taskId: z.string().describe("ID of the task to add a subtask to"),
-        name: z.string().describe("Name of the subtask"),
-        finished: z.boolean().optional().describe("Whether the subtask is completed (default: false)"),
-        userId: z.string().optional().describe("ID of the user to assign the subtask to"),
-        dueDateTimestamp: z.string().optional().describe("UTC timestamp when subtask is due (format: '2023-03-01T12:00:00Z')"),
-        dueDateTimestampLocal: z.string().optional().describe("Local timestamp when subtask is due"),
-    },
-    async ({ taskId, name, finished, userId, dueDateTimestamp, dueDateTimestampLocal }) => {
-        try {
-            // Build subtask object with only provided properties
-            const subtask: any = { name };
-            if (finished !== undefined) subtask.finished = finished;
-            if (userId !== undefined) subtask.userId = userId;
-            if (dueDateTimestamp !== undefined) subtask.dueDateTimestamp = dueDateTimestamp;
-            if (dueDateTimestampLocal !== undefined) subtask.dueDateTimestampLocal = dueDateTimestampLocal;
-
-            const result = await kanbanService.addSubtask(taskId, subtask);
-
-            // Get updated task details to show the result
-            const updatedTask = await kanbanService.getTaskDetails(taskId);
-
-            // Format response
-            let response = `Successfully added subtask!\n`;
-            response += `- Subtask name: ${name}\n`;
-            response += `- Inserted at position: ${result.insertIndex}\n`;
-            response += `- Task: ${updatedTask.name}\n`;
-            
-            if (updatedTask.subTasks && updatedTask.subTasks.length > 0) {
-                response += `\nCurrent subtasks (${updatedTask.subTasks.length}):\n`;
-                updatedTask.subTasks.forEach((subtask: any, index: number) => {
-                    const status = subtask.finished ? '✅' : '⬜';
-                    response += `  ${index + 1}. ${status} ${subtask.name || 'Unnamed subtask'}`;
-                    if (subtask.userId) response += ` (assigned to: ${subtask.userId})`;
-                    if (subtask.dueDateTimestamp) response += ` (due: ${subtask.dueDateTimestamp})`;
-                    response += `\n`;
-                });
-            }
-
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: response,
-                    },
-                ],
-            };
-        } catch (error: any) {
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: `Failed to add subtask: ${error.message}`,
-                    },
-                ],
-            };
-        }
-    }
-);
-
-server.tool(
-    "update-subtask-by-position",
-    "Update a subtask by its position in the subtask list",
-    {
-        taskId: z.string().describe("ID of the task containing the subtask"),
-        index: z.number().describe("0-based position of the subtask to update"),
-        name: z.string().optional().describe("New subtask name"),
-        finished: z.boolean().optional().describe("Whether the subtask is completed"),
-        userId: z.string().optional().describe("ID of the user to assign the subtask to (use null to clear)"),
-        dueDateTimestamp: z.string().optional().describe("UTC timestamp when subtask is due (use null to clear)"),
-        dueDateTimestampLocal: z.string().optional().describe("Local timestamp when subtask is due (use null to clear)"),
-    },
-    async ({ taskId, index, name, finished, userId, dueDateTimestamp, dueDateTimestampLocal }) => {
-        try {
-            // Build update object with only provided properties
-            const updates: any = {};
-            if (name !== undefined) updates.name = name;
-            if (finished !== undefined) updates.finished = finished;
-            if (userId !== undefined) updates.userId = userId;
-            if (dueDateTimestamp !== undefined) updates.dueDateTimestamp = dueDateTimestamp;
-            if (dueDateTimestampLocal !== undefined) updates.dueDateTimestampLocal = dueDateTimestampLocal;
-
-            await kanbanService.updateSubtaskByPosition(taskId, index, updates);
-
-            // Get updated task details to show the result
-            const updatedTask = await kanbanService.getTaskDetails(taskId);
-
-            // Format response
-            let response = `Successfully updated subtask at position ${index}!\n`;
-            response += `- Task: ${updatedTask.name}\n`;
-            
-            if (updatedTask.subTasks && updatedTask.subTasks.length > 0) {
-                response += `\nCurrent subtasks (${updatedTask.subTasks.length}):\n`;
-                updatedTask.subTasks.forEach((subtask: any, idx: number) => {
-                    const status = subtask.finished ? '✅' : '⬜';
-                    const highlight = idx === index ? ' ← UPDATED' : '';
-                    response += `  ${idx + 1}. ${status} ${subtask.name || 'Unnamed subtask'}`;
-                    if (subtask.userId) response += ` (assigned to: ${subtask.userId})`;
-                    if (subtask.dueDateTimestamp) response += ` (due: ${subtask.dueDateTimestamp})`;
-                    response += `${highlight}\n`;
-                });
-            } else {
-                response += `\nNo subtasks found in this task.`;
-            }
-
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: response,
-                    },
-                ],
-            };
-        } catch (error: any) {
-            return {
-                content: [
-                    {
-                        type: "text",
-                        text: `Failed to update subtask: ${error.message}`,
-                    },
-                ],
-            };
-        }
-    }
-);
-
-server.tool(
-    "add-label",
-    "Add a label to an existing task",
-    {
-        taskId: z.string().describe("ID of the task to add a label to"),
-        name: z.string().describe("Name of the label"),
-        pinned: z.boolean().optional().describe("Whether the label should be pinned (default: false)"),
-    },
-    async ({ taskId, name, pinned }) => {
-        try {
-            const label: any = { name };
-            if (pinned !== undefined) label.pinned = pinned;
-
-            const result = await kanbanService.addLabel(taskId, label);
-            const updatedTask = await kanbanService.getTaskDetails(taskId);
-
-            let response = `Successfully added label!\n`;
-            response += `- Label name: ${name}\n`;
-            response += `- Pinned: ${pinned || false}\n`;
-            response += `- Inserted at position: ${result.insertIndex}\n`;
-            response += `- Task: ${updatedTask.name}\n`;
-            
-            if (updatedTask.labels && updatedTask.labels.length > 0) {
-                response += `\nCurrent labels (${updatedTask.labels.length}):\n`;
-                updatedTask.labels.forEach((label: any, index: number) => {
-                    const pinnedStatus = label.pinned ? '📌' : '🏷️';
-                    response += `  ${index + 1}. ${pinnedStatus} ${label.name}\n`;
-                });
-            }
-
-            return {
-                content: [{ type: "text", text: response }],
-            };
-        } catch (error: any) {
-            return {
-                content: [{ type: "text", text: `Failed to add label: ${error.message}` }],
-            };
-        }
-    }
-);
-
-server.tool(
-    "update-label",
-    "Update an existing label on a task by finding it by name",
-    {
-        taskId: z.string().describe("ID of the task containing the label"),
-        labelName: z.string().describe("Current name of the label (case-sensitive)"),
-        name: z.string().optional().describe("New label name"),
-        pinned: z.boolean().optional().describe("Whether the label should be pinned"),
-    },
-    async ({ taskId, labelName, name, pinned }) => {
-        try {
-            const updates: any = {};
-            if (name !== undefined) updates.name = name;
-            if (pinned !== undefined) updates.pinned = pinned;
-
-            await kanbanService.updateLabel(taskId, labelName, updates);
-            const updatedTask = await kanbanService.getTaskDetails(taskId);
-
-            let response = `Successfully updated label!\n`;
-            response += `- Original label: ${labelName}\n`;
-            if (name) response += `- New name: ${name}\n`;
-            if (pinned !== undefined) response += `- Pinned: ${pinned}\n`;
-            response += `- Task: ${updatedTask.name}\n`;
-            
-            if (updatedTask.labels && updatedTask.labels.length > 0) {
-                response += `\nCurrent labels (${updatedTask.labels.length}):\n`;
-                updatedTask.labels.forEach((label: any, index: number) => {
-                    const pinnedStatus = label.pinned ? '📌' : '🏷️';
-                    response += `  ${index + 1}. ${pinnedStatus} ${label.name}\n`;
-                });
-            }
-
-            return {
-                content: [{ type: "text", text: response }],
-            };
-        } catch (error: any) {
-            return {
-                content: [{ type: "text", text: `Failed to update label: ${error.message}` }],
-            };
-        }
-    }
-);
-
-server.tool(
-    "set-task-due-date",
-    "Set or update a due date for a task",
-    {
-        taskId: z.string().describe("ID of the task to set due date for"),
-        dueTimestamp: z.string().describe("UTC timestamp when task is due (format: '2023-03-01T12:00:00Z')"),
-        targetColumnId: z.string().describe("ID of column task should reach before due"),
-        dueTimestampLocal: z.string().optional().describe("Local timestamp (defaults to dueTimestamp)"),
-        dateType: z.string().optional().describe("Type of date (default: 'dueDate')"),
-        status: z.string().optional().describe("Status: 'active' or 'done' (default: 'active')"),
-    },
-    async ({ taskId, dueTimestamp, targetColumnId, dueTimestampLocal, dateType, status }) => {
-        try {
-            const dateInfo: any = { dueTimestamp, targetColumnId };
-            if (dueTimestampLocal) dateInfo.dueTimestampLocal = dueTimestampLocal;
-            if (dateType) dateInfo.dateType = dateType;
-            if (status) dateInfo.status = status;
-
-            await kanbanService.setTaskDueDate(taskId, dateInfo);
-            const updatedTask = await kanbanService.getTaskDetails(taskId);
-
-            let response = `Successfully set due date!\n`;
-            response += `- Task: ${updatedTask.name}\n`;
-            response += `- Due: ${dueTimestamp}\n`;
-            response += `- Target column: ${targetColumnId}\n`;
-            response += `- Status: ${status || 'active'}\n`;
-            
-            if (updatedTask.dates && updatedTask.dates.length > 0) {
-                response += `\nCurrent dates (${updatedTask.dates.length}):\n`;
-                updatedTask.dates.forEach((date: any, index: number) => {
-                    response += `  ${index + 1}. ${date.dateType || 'date'}: ${date.dueTimestamp || 'not set'}\n`;
-                });
-            }
-
-            return {
-                content: [{ type: "text", text: response }],
-            };
-        } catch (error: any) {
-            return {
-                content: [{ type: "text", text: `Failed to set due date: ${error.message}` }],
-            };
-        }
-    }
-);
-
-server.tool(
-    "update-custom-field",
-    "Set or update a custom field value on a task",
-    {
-        taskId: z.string().describe("ID of the task to update"),
-        customFieldId: z.string().describe("ID of the custom field"),
-        textValue: z.string().optional().describe("Text value for text/dropdown fields"),
-        numberValue: z.number().optional().describe("Number value for number fields"),
-    },
-    async ({ taskId, customFieldId, textValue, numberValue }) => {
-        try {
-            const value: any = {};
-            if (textValue !== undefined) value.text = textValue;
-            if (numberValue !== undefined) value.number = numberValue;
-
-            await kanbanService.updateCustomField(taskId, customFieldId, { value });
-            const updatedTask = await kanbanService.getTaskDetails(taskId);
-
-            let response = `Successfully updated custom field!\n`;
-            response += `- Task: ${updatedTask.name}\n`;
-            response += `- Custom field ID: ${customFieldId}\n`;
-            if (textValue) response += `- Text value: ${textValue}\n`;
-            if (numberValue) response += `- Number value: ${numberValue}\n`;
-            
-            if (updatedTask.customFields && updatedTask.customFields.length > 0) {
-                response += `\nCurrent custom fields (${updatedTask.customFields.length}):\n`;
-                updatedTask.customFields.forEach((field: any, index: number) => {
-                    response += `  ${index + 1}. Field: ${field.name || field.id || 'unnamed'}\n`;
-                });
-            }
-
-            return {
-                content: [{ type: "text", text: response }],
-            };
-        } catch (error: any) {
-            return {
-                content: [{ type: "text", text: `Failed to update custom field: ${error.message}` }],
-            };
-        }
-    }
-);
-
-server.tool(
-    "add-comment",
-    "Add a comment to an existing task",
-    {
-        taskId: z.string().describe("ID of the task to add a comment to"),
-        text: z.string().describe("The comment text"),
-        authorUserId: z.string().optional().describe("ID of the comment author (defaults to API user)"),
-        createdTimestamp: z.string().optional().describe("UTC timestamp when comment was created (defaults to now)"),
-    },
-    async ({ taskId, text, authorUserId, createdTimestamp }) => {
-        try {
-            const comment: any = { text };
-            if (authorUserId !== undefined) comment.authorUserId = authorUserId;
-            if (createdTimestamp !== undefined) comment.createdTimestamp = createdTimestamp;
-
-            const result = await kanbanService.addComment(taskId, comment);
-            const updatedTask = await kanbanService.getTaskDetails(taskId);
-
-            let response = `Successfully added comment!\n`;
-            response += `- Comment ID: ${result.taskCommentId}\n`;
-            response += `- Text: ${text.substring(0, 100)}${text.length > 100 ? '...' : ''}\n`;
-            response += `- Task: ${updatedTask.name}\n`;
-            if (authorUserId) response += `- Author: ${authorUserId}\n`;
-
-            return {
-                content: [{ type: "text", text: response }],
-            };
-        } catch (error: any) {
-            return {
-                content: [{ type: "text", text: `Failed to add comment: ${error.message}` }],
-            };
-        }
-    }
-);
-
-server.tool(
-    "update-comment",
-    "Update an existing comment on a task",
-    {
-        taskId: z.string().describe("ID of the task containing the comment"),
-        commentId: z.string().describe("ID of the comment to update"),
-        text: z.string().optional().describe("New comment text"),
-        authorUserId: z.string().optional().describe("Comment author ID"),
-        createdTimestamp: z.string().optional().describe("UTC creation timestamp"),
-        updatedTimestamp: z.string().optional().describe("UTC update timestamp (defaults to current time)"),
-    },
-    async ({ taskId, commentId, text, authorUserId, createdTimestamp, updatedTimestamp }) => {
-        try {
-            const updates: any = {};
-            if (text !== undefined) updates.text = text;
-            if (authorUserId !== undefined) updates.authorUserId = authorUserId;
-            if (createdTimestamp !== undefined) updates.createdTimestamp = createdTimestamp;
-            if (updatedTimestamp !== undefined) updates.updatedTimestamp = updatedTimestamp;
-
-            await kanbanService.updateComment(taskId, commentId, updates);
-            const updatedTask = await kanbanService.getTaskDetails(taskId);
-
-            let response = `Successfully updated comment!\n`;
-            response += `- Task: ${updatedTask.name}\n`;
-            response += `- Comment ID: ${commentId}\n`;
-            if (text) response += `- New text: ${text.substring(0, 100)}${text.length > 100 ? '...' : ''}\n`;
-            if (authorUserId) response += `- Author: ${authorUserId}\n`;
-
-            return {
-                content: [{ type: "text", text: response }],
-            };
-        } catch (error: any) {
-            return {
-                content: [{ type: "text", text: `Failed to update comment: ${error.message}` }],
-            };
-        }
-    }
-);
-
-server.tool(
-    "add-subtasks",
-    "Add multiple subtasks to an existing task in one operation",
-    {
-        taskId: z.string().describe("ID of the task to add subtasks to"),
-        subtasks: z.array(z.object({
-            name: z.string().describe("Name of the subtask"),
-            finished: z.boolean().optional().describe("Whether the subtask is completed (default: false)"),
-            userId: z.string().optional().describe("ID of the user to assign the subtask to"),
-            dueDateTimestamp: z.string().optional().describe("UTC timestamp when subtask is due"),
-            dueDateTimestampLocal: z.string().optional().describe("Local timestamp when subtask is due"),
-        })).describe("Array of subtasks to add"),
-    },
-    async ({ taskId, subtasks }) => {
-        try {
-            const result = await kanbanService.addMultipleSubtasks(taskId, { subtasks });
-            const updatedTask = await kanbanService.getTaskDetails(taskId);
-
-            let response = `Successfully added ${result.totalAdded} subtasks!\n`;
-            response += `- Task: ${updatedTask.name}\n`;
-            response += `- Total subtasks added: ${result.totalAdded}\n\n`;
-            
-            result.addedSubtasks.forEach((subtask, index) => {
-                response += `${index + 1}. "${subtask.name}" (position: ${subtask.insertIndex})\n`;
-            });
-
-            if (updatedTask.subTasks && updatedTask.subTasks.length > 0) {
-                response += `\nAll current subtasks (${updatedTask.subTasks.length}):\n`;
-                updatedTask.subTasks.forEach((subtask: any, index: number) => {
-                    const status = subtask.finished ? '✅' : '⬜';
-                    response += `  ${index + 1}. ${status} ${subtask.name || 'Unnamed subtask'}\n`;
-                });
-            }
-
-            return {
-                content: [{ type: "text", text: response }],
-            };
-        } catch (error: any) {
-            return {
-                content: [{ type: "text", text: `Failed to add subtasks: ${error.message}` }],
-            };
-        }
-    }
-);
-
-server.tool(
-    "create-task-with-subtasks",
-    "Create a new task and add multiple subtasks to it in one operation",
-    {
-        name: z.string().describe("Name of the task"),
-        columnId: z.string().describe("ID of the column to create the task in"),
-        description: z.string().optional().describe("Optional task description"),
-        color: z.enum(['yellow', 'white', 'red', 'green', 'blue', 'purple', 'orange', 'cyan', 'brown', 'magenta']).optional().describe("Task color"),
-        position: z.union([z.string(), z.number()]).optional().describe("Task position (number, 'top', or 'bottom')"),
-        subtasks: z.array(z.object({
-            name: z.string().describe("Name of the subtask"),
-            finished: z.boolean().optional().describe("Whether the subtask is completed (default: false)"),
-            userId: z.string().optional().describe("ID of the user to assign the subtask to"),
-            dueDateTimestamp: z.string().optional().describe("UTC timestamp when subtask is due"),
-            dueDateTimestampLocal: z.string().optional().describe("Local timestamp when subtask is due"),
-        })).describe("Array of subtasks to add to the new task"),
-    },
-    async ({ name, columnId, description, color, position, subtasks }) => {
-        try {
-            const result = await kanbanService.createTaskWithSubtasks({
-                name,
-                columnId,
-                description,
-                color,
-                position,
-                subtasks
-            });
-            
-            const createdTask = await kanbanService.getTaskDetails(result.taskId);
-
-            let response = `Successfully created task with ${result.totalSubtasks} subtasks!\n`;
-            response += `- Task ID: ${result.taskId}\n`;
-            response += `- Task Name: ${result.taskName}\n`;
-            response += `- Column ID: ${columnId}\n`;
-            if (description) response += `- Description: ${description}\n`;
-            if (color) response += `- Color: ${color}\n`;
-            response += `- Total subtasks: ${result.totalSubtasks}\n\n`;
-            
-            response += `Added subtasks:\n`;
-            result.addedSubtasks.forEach((subtask, index) => {
-                response += `${index + 1}. "${subtask.name}" (position: ${subtask.insertIndex})\n`;
-            });
-
-            if (createdTask.subTasks && createdTask.subTasks.length > 0) {
-                response += `\nCurrent subtasks status:\n`;
-                createdTask.subTasks.forEach((subtask: any, index: number) => {
-                    const status = subtask.finished ? '✅' : '⬜';
-                    response += `  ${index + 1}. ${status} ${subtask.name || 'Unnamed subtask'}\n`;
-                });
-            }
-
-            return {
-                content: [{ type: "text", text: response }],
-            };
-        } catch (error: any) {
-            return {
-                content: [{ type: "text", text: `Failed to create task with subtasks: ${error.message}` }],
-            };
-        }
-    }
-);
-
-// Tools registered
-
-// CLI Setup Functions
-async function detectInstallationMethod(): Promise<'global' | 'local'> {
-    try {
-        const __filename = fileURLToPath(import.meta.url);
-        const __dirname = path.dirname(__filename);
-        
-        // Check if we're in node_modules (global install)
-        if (__dirname.includes('node_modules')) {
-            return 'global';
-        }
-        return 'local';
-    } catch {
-        return 'local';
-    }
-}
-
-async function getExecutablePath(installMethod: 'global' | 'local'): Promise<{ command?: string; args?: string[] }> {
-    // ALWAYS use node + args format for maximum reliability
-    const __filename = fileURLToPath(import.meta.url);
-    return { command: "node", args: [__filename] };
-}
-
-async function createCursorMcpConfig(projectPath: string, execConfig: { command?: string; args?: string[] }, apiToken: string) {
-    const cursorDir = path.join(projectPath, '.cursor');
-    const mcpJsonPath = path.join(cursorDir, 'mcp.json');
-    
-    // Ensure .cursor directory exists
-    try {
-        await fs.mkdir(cursorDir, { recursive: true });
-    } catch (error) {
-        // Directory might already exist
-    }
-    
-    // Create MCP configuration
-    const mcpConfig = {
-        mcpServers: {
-            "kanban-flow": {
-                ...execConfig,
-                env: {
-                    KANBAN_API_TOKEN: apiToken
+                    created.push(`${row.name} [ID: ${task.taskId}]`);
+                } catch (error: any) {
+                    failed.push(`${row.name}: ${error.message}`);
                 }
             }
-        }
-    };
-    
-    // Check if mcp.json already exists
-    let existingConfig = {};
-    let isExistingFile = false;
-    let hasExistingServers = false;
-    
-    try {
-        const existingContent = await fs.readFile(mcpJsonPath, 'utf-8');
-        existingConfig = JSON.parse(existingContent);
-        isExistingFile = true;
-        hasExistingServers = existingConfig && (existingConfig as any).mcpServers && Object.keys((existingConfig as any).mcpServers).length > 0;
-        
-        if (hasExistingServers) {
-            console.log(`📋 Found existing MCP configuration with ${Object.keys((existingConfig as any).mcpServers).length} server(s)`);
-            
-            // Check if kanban-flow already exists
-            if ((existingConfig as any).mcpServers?.['kanban-flow']) {
-                console.log('🔄 Updating existing kanban-flow configuration...');
-            } else {
-                console.log('➕ Adding kanban-flow to existing configuration...');
-            }
-        }
-    } catch {
-        // File doesn't exist or is invalid, start fresh
-        console.log('📝 Creating new MCP configuration file...');
-    }
-    
-    // Merge configurations safely
-    const finalConfig = {
-        ...existingConfig,
-        mcpServers: {
-            ...(existingConfig as any)?.mcpServers,
-            ...mcpConfig.mcpServers
-        }
-    };
-    
-    // Create backup if overwriting existing file with servers
-    if (isExistingFile && hasExistingServers) {
-        const backupPath = mcpJsonPath + '.backup.' + Date.now();
-        try {
-            await fs.copyFile(mcpJsonPath, backupPath);
-            console.log(`💾 Created backup: ${path.basename(backupPath)}`);
-        } catch (error) {
-            console.warn('⚠️  Could not create backup file');
+            let out = `Created ${created.length}/${rows.length} tasks.\n`;
+            if (created.length > 0) out += `\nCreated:\n${created.map(c => `- ${c}`).join('\n')}\n`;
+            if (failed.length > 0) out += `\nFailed:\n${failed.map(f => `- ${f}`).join('\n')}\n`;
+            return text(out.trim());
+        } catch (error: any) {
+            return errorText("import CSV", error);
         }
     }
-    
-    // Write configuration
-    await fs.writeFile(mcpJsonPath, JSON.stringify(finalConfig, null, 2));
-    return mcpJsonPath;
-}
+);
 
-async function runSetupWizard() {
-    console.log('🚀 KanbanFlow MCP Server Setup Wizard\n');
-    
-    // Detect installation method
-    const installMethod = await detectInstallationMethod();
-    console.log(`📦 Installation method: ${installMethod}`);
-    
-    // Get executable configuration
-    const execConfig = await getExecutablePath(installMethod);
-    
-    // Prompt for API token
-    const response = await prompts({
-        type: 'password',
-        name: 'apiToken',
-        message: 'Enter your KanbanFlow API token (get it from kanbanflow.com/api):',
-        validate: (value) => value.length > 0 ? true : 'API token is required'
-    });
-    
-    if (!response.apiToken) {
-        console.log('❌ Setup cancelled');
-        process.exit(0);
-    }
-    
-    // Create configuration
-    const projectPath = process.cwd();
-    try {
-        const configPath = await createCursorMcpConfig(projectPath, execConfig, response.apiToken);
-        
-        console.log('\n✅ Setup complete!');
-        console.log(`📁 Configuration: ${configPath}`);
-        console.log('🔄 Please restart Cursor to use KanbanFlow tools');
-        console.log('\n💡 Your existing MCP servers (if any) are preserved!');
-        console.log('🎉 You can now ask Claude to manage your KanbanFlow board!');
-        
-    } catch (error) {
-        console.error('\n❌ Setup failed:', error);
-        process.exit(1);
-    }
-}
+// ---------- startup ----------
 
-function showHelp() {
-    console.log(`
-🔧 KanbanFlow MCP Server
-
-USAGE:
-  kanbanflow-mcp-server [options]
-
-OPTIONS:
-  --setup, --init    Set up MCP configuration for current project
-  --help, -h         Show this help message
-
-EXAMPLES:
-  kanbanflow-mcp-server --setup    # Interactive setup wizard
-  kanbanflow-mcp-server            # Start MCP server (used by Cursor)
-
-For more information, visit: https://github.com/your-username/kanbanflow-mcp-server
-    `);
-}
-
-// Start the server with stdio transport
-async function startMcpServer() {
-    console.error("[MCP Server] Starting Kanban Flow MCP server with stdio transport...");
-    const transport = new StdioServerTransport();
-    console.error("[MCP Server] Connecting server to stdio transport...");
-    await server.connect(transport);
-    console.error("[MCP Server] Kanban Flow MCP Server ready for stdio communication");
-}
-
-// Main entry point with CLI detection
 async function main() {
-    const args = process.argv.slice(2);
-    
-    // Check for CLI commands
-    if (args.includes('--setup') || args.includes('--init')) {
-        await runSetupWizard();
-        process.exit(0);
-    }
-    
-    if (args.includes('--help') || args.includes('-h')) {
-        showHelp();
-        process.exit(0);
-    }
-    
-    // Default: start MCP server
-    await startMcpServer();
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    console.error("KanbanFlow MCP Server (multi-board) running on stdio");
 }
 
 main().catch((error) => {
-    console.error("[MCP Server] Fatal error in main():", error);
+    console.error("Fatal error running server:", error);
     process.exit(1);
 });

@@ -1,216 +1,212 @@
 import { KanbanClient } from './kanban-client.js';
-import { KANBAN_CONFIG } from './config.js';
-import { Board, CreateTaskRequest, CreateTaskResponse, KanbanColumnTasksResponse, KanbanTask, UpdateTaskRequest, KanbanAllTasksResponse, AddSubtaskRequest, AddSubtaskResponse, UpdateSubtaskRequest, AddLabelRequest, AddLabelResponse, UpdateLabelRequest, SetTaskDueDateRequest, UpdateCustomFieldRequest, AddCommentRequest, AddCommentResponse, UpdateCommentRequest, AddSubtasksRequest, AddSubtasksResponse, CreateTaskWithSubtasksRequest, CreateTaskWithSubtasksResponse } from './types.js';
+import {
+    Board,
+    CreateTaskRequest,
+    CreateTaskResponse,
+    KanbanTask,
+    UpdateTaskRequest,
+    KanbanAllTasksResponse,
+    CreateSubtaskRequest,
+    CreateSubtaskResponse,
+    Subtask,
+    CreateLabelRequest,
+    CreateLabelResponse,
+    Label,
+    SetTaskDateRequest,
+    TaskDate,
+    Collaborator,
+    AddCommentRequest,
+    AddCommentResponse,
+    TaskComment,
+    Attachment,
+    TaskRelation,
+    BoardCustomField,
+    TaskCustomFieldValue,
+    KanbanUser,
+    KanbanEvent,
+    AddManualTimeEntryRequest,
+    ManualTimeEntry,
+    TimeEntry,
+    MoveTaskToBoardRequest,
+} from './types.js';
 
-export class KanbanService {
-    private client: KanbanClient;
+// --- Board ---
 
-    constructor() {
-        this.client = new KanbanClient();
-    }
+export async function getBoard(client: KanbanClient): Promise<Board> {
+    return client.get<Board>('/board');
+}
 
-    async getBoard(): Promise<Board> {
-        try {
-            const board = await this.client.get<Board>(KANBAN_CONFIG.ENDPOINTS.BOARD);
-            return board;
-        } catch (error) {
-            throw error;
-        }
-    }
+// --- Tasks ---
 
-    async createTask(task: CreateTaskRequest): Promise<CreateTaskResponse> {
-        try {
-            const response = await this.client.post<CreateTaskResponse>(
-                KANBAN_CONFIG.ENDPOINTS.TASKS,
-                task
-            );
-            return response;
-        } catch (error) {
-            throw error;
-        }
-    }
+export async function createTask(client: KanbanClient, task: CreateTaskRequest): Promise<CreateTaskResponse> {
+    return client.post<CreateTaskResponse>('/tasks', task);
+}
 
-    async getTasksByColumnId(columnId: string): Promise<KanbanTask[]> {
-        try {
-            const response = await this.client.get<KanbanColumnTasksResponse[]>(
-                `${KANBAN_CONFIG.ENDPOINTS.TASKS}?columnId=${columnId}`
-            );
-            if (response.length === 0) {
-                return [];
-            }
-            const columnTasks = response[0];
-            return columnTasks.tasks;
-        } catch (error) {
-            throw error;
-        }
-    }
+export async function getTaskById(client: KanbanClient, taskId: string, includePosition?: boolean): Promise<KanbanTask> {
+    return client.get<KanbanTask>(`/tasks/${taskId}`, includePosition ? { includePosition: true } : undefined);
+}
 
-    async getTaskDetails(taskId: string, includePosition?: boolean): Promise<KanbanTask> {
-        try {
-            let endpoint = `${KANBAN_CONFIG.ENDPOINTS.TASKS}/${taskId}`;
-            if (includePosition) {
-                endpoint += '?includePosition=true';
-            }
-            const task = await this.client.get<KanbanTask>(endpoint);
-            return task;
-        } catch (error) {
-            throw error;
-        }
-    }
+export async function getTasksByColumn(client: KanbanClient, columnId: string, swimlaneId?: string): Promise<KanbanTask[]> {
+    const params: Record<string, any> = { columnId };
+    if (swimlaneId) params.swimlaneId = swimlaneId;
+    const response = await client.get<KanbanAllTasksResponse[]>('/tasks', params);
+    return response.length > 0 ? response[0].tasks : [];
+}
 
-    async updateTask(taskId: string, updates: UpdateTaskRequest): Promise<KanbanTask> {
-        try {
-            const task = await this.client.post<KanbanTask>(
-                `${KANBAN_CONFIG.ENDPOINTS.TASKS}/${taskId}`,
-                updates
-            );
-            return task;
-        } catch (error) {
-            throw error;
-        }
-    }
+export async function getAllTasks(client: KanbanClient): Promise<KanbanAllTasksResponse[]> {
+    return client.get<KanbanAllTasksResponse[]>('/tasks');
+}
 
-    async getAllTasks(): Promise<KanbanAllTasksResponse[]> {
-        try {
-            const response = await this.client.get<KanbanAllTasksResponse[]>(
-                KANBAN_CONFIG.ENDPOINTS.TASKS
-            );
-            return response;
-        } catch (error) {
-            throw error;
-        }
-    }
+export async function updateTask(client: KanbanClient, taskId: string, updates: UpdateTaskRequest): Promise<KanbanTask> {
+    return client.post<KanbanTask>(`/tasks/${taskId}`, updates);
+}
 
-    async addSubtask(taskId: string, subtask: AddSubtaskRequest): Promise<AddSubtaskResponse> {
-        try {
-            const response = await this.client.post<AddSubtaskResponse>(
-                `${KANBAN_CONFIG.ENDPOINTS.TASKS}/${taskId}/subtasks`,
-                subtask
-            );
-            return response;
-        } catch (error) {
-            throw error;
-        }
-    }
+export async function deleteTask(client: KanbanClient, taskId: string): Promise<void> {
+    await client.delete<void>(`/tasks/${taskId}`);
+}
 
-    async updateSubtaskByPosition(taskId: string, index: number, updates: UpdateSubtaskRequest): Promise<void> {
-        try {
-            await this.client.post<void>(
-                `${KANBAN_CONFIG.ENDPOINTS.TASKS}/${taskId}/subtasks/by-index/${index}`,
-                updates
-            );
-        } catch (error) {
-            throw error;
-        }
-    }
+export async function moveTaskToBoard(
+    client: KanbanClient,
+    taskId: string,
+    targetBoardId: string,
+    targetToken: string,
+    request: MoveTaskToBoardRequest
+): Promise<void> {
+    await client.post<void>(
+        `/tasks/${taskId}/move-to-board/${targetBoardId}`,
+        request,
+        { 'X-Target-Authorization': `Bearer ${targetToken}` }
+    );
+}
 
-    async addLabel(taskId: string, label: AddLabelRequest): Promise<AddLabelResponse> {
-        try {
-            const response = await this.client.post<AddLabelResponse>(
-                `${KANBAN_CONFIG.ENDPOINTS.TASKS}/${taskId}/labels`,
-                label
-            );
-            return response;
-        } catch (error) {
-            throw error;
-        }
-    }
+// --- Subtasks ---
 
-    async updateLabel(taskId: string, labelName: string, updates: UpdateLabelRequest): Promise<void> {
-        try {
-            await this.client.post<void>(
-                `${KANBAN_CONFIG.ENDPOINTS.TASKS}/${taskId}/labels/by-name/${encodeURIComponent(labelName)}`,
-                updates
-            );
-        } catch (error) {
-            throw error;
-        }
-    }
+export async function createSubtask(client: KanbanClient, taskId: string, subtask: CreateSubtaskRequest): Promise<CreateSubtaskResponse> {
+    return client.post<CreateSubtaskResponse>(`/tasks/${taskId}/subtasks`, subtask);
+}
 
-    async setTaskDueDate(taskId: string, dateInfo: SetTaskDueDateRequest): Promise<void> {
-        try {
-            await this.client.post<void>(
-                `${KANBAN_CONFIG.ENDPOINTS.TASKS}/${taskId}/dates`,
-                dateInfo
-            );
-        } catch (error) {
-            throw error;
-        }
-    }
+export async function getSubtasks(client: KanbanClient, taskId: string): Promise<Subtask[]> {
+    return client.get<Subtask[]>(`/tasks/${taskId}/subtasks`);
+}
 
-    async updateCustomField(taskId: string, customFieldId: string, fieldValue: UpdateCustomFieldRequest): Promise<void> {
-        try {
-            await this.client.post<void>(
-                `${KANBAN_CONFIG.ENDPOINTS.TASKS}/${taskId}/custom-fields/${customFieldId}`,
-                fieldValue
-            );
-        } catch (error) {
-            throw error;
-        }
-    }
+// --- Labels ---
 
-    async addComment(taskId: string, comment: AddCommentRequest): Promise<AddCommentResponse> {
-        try {
-            const response = await this.client.post<AddCommentResponse>(
-                `${KANBAN_CONFIG.ENDPOINTS.TASKS}/${taskId}/comments`,
-                comment
-            );
-            return response;
-        } catch (error) {
-            throw error;
-        }
-    }
+export async function createLabel(client: KanbanClient, taskId: string, label: CreateLabelRequest): Promise<CreateLabelResponse> {
+    return client.post<CreateLabelResponse>(`/tasks/${taskId}/labels`, label);
+}
 
-    async updateComment(taskId: string, commentId: string, updates: UpdateCommentRequest): Promise<void> {
-        try {
-            await this.client.post<void>(
-                `${KANBAN_CONFIG.ENDPOINTS.TASKS}/${taskId}/comments/${commentId}`,
-                updates
-            );
-        } catch (error) {
-            throw error;
-        }
-    }
+export async function getLabels(client: KanbanClient, taskId: string): Promise<Label[]> {
+    return client.get<Label[]>(`/tasks/${taskId}/labels`);
+}
 
-    async addMultipleSubtasks(taskId: string, request: AddSubtasksRequest): Promise<AddSubtasksResponse> {
-        try {
-            const addedSubtasks: { name: string; insertIndex: number; }[] = [];
-            for (const subtask of request.subtasks) {
-                const response = await this.addSubtask(taskId, subtask);
-                addedSubtasks.push({
-                    name: subtask.name,
-                    insertIndex: response.insertIndex
-                });
-            }
-            return {
-                addedSubtasks,
-                totalAdded: addedSubtasks.length
-            };
-        } catch (error) {
-            throw error;
-        }
-    }
+// --- Dates ---
 
-    async createTaskWithSubtasks(request: CreateTaskWithSubtasksRequest): Promise<CreateTaskWithSubtasksResponse> {
-        try {
-            const taskResponse = await this.createTask({
-                name: request.name,
-                columnId: request.columnId,
-                description: request.description,
-                color: request.color,
-                position: request.position
-            });
-            const subtasksResponse = await this.addMultipleSubtasks(taskResponse.taskId, {
-                subtasks: request.subtasks
-            });
-            return {
-                taskId: taskResponse.taskId,
-                taskName: request.name,
-                addedSubtasks: subtasksResponse.addedSubtasks,
-                totalSubtasks: subtasksResponse.totalAdded
-            };
-        } catch (error) {
-            throw error;
-        }
-    }
-} 
+export async function setDate(client: KanbanClient, taskId: string, date: SetTaskDateRequest): Promise<void> {
+    await client.post<void>(`/tasks/${taskId}/dates`, date);
+}
+
+export async function getDates(client: KanbanClient, taskId: string): Promise<TaskDate[]> {
+    return client.get<TaskDate[]>(`/tasks/${taskId}/dates`);
+}
+
+// --- Collaborators ---
+
+export async function getCollaborators(client: KanbanClient, taskId: string): Promise<Collaborator[]> {
+    return client.get<Collaborator[]>(`/tasks/${taskId}/collaborators`);
+}
+
+// --- Comments ---
+
+export async function addComment(client: KanbanClient, taskId: string, comment: AddCommentRequest): Promise<AddCommentResponse> {
+    return client.post<AddCommentResponse>(`/tasks/${taskId}/comments`, comment);
+}
+
+export async function getComments(client: KanbanClient, taskId: string): Promise<TaskComment[]> {
+    return client.get<TaskComment[]>(`/tasks/${taskId}/comments`);
+}
+
+// --- Attachments ---
+
+export async function getAttachments(client: KanbanClient, taskId: string): Promise<Attachment[]> {
+    return client.get<Attachment[]>(`/tasks/${taskId}/attachments`);
+}
+
+// --- Relations ---
+
+export async function getRelations(client: KanbanClient, taskId: string): Promise<TaskRelation[]> {
+    return client.get<TaskRelation[]>(`/tasks/${taskId}/relations`);
+}
+
+// --- Custom fields ---
+
+export async function getBoardCustomFields(client: KanbanClient): Promise<BoardCustomField[]> {
+    return client.get<BoardCustomField[]>('/custom-fields');
+}
+
+export async function getTaskCustomFields(client: KanbanClient, taskId: string): Promise<TaskCustomFieldValue[]> {
+    return client.get<TaskCustomFieldValue[]>(`/tasks/${taskId}/custom-fields`);
+}
+
+// --- Users ---
+
+export async function getUsers(client: KanbanClient): Promise<KanbanUser[]> {
+    return client.get<KanbanUser[]>('/users');
+}
+
+// --- Events ---
+
+export async function getBoardEvents(
+    client: KanbanClient,
+    from?: string,
+    to?: string,
+    limit?: number,
+    order?: 'ascending' | 'descending'
+): Promise<KanbanEvent[]> {
+    const params: Record<string, any> = {};
+    if (from) params.from = from;
+    if (to) params.to = to;
+    if (limit) params.limit = limit;
+    if (order) params.order = order;
+    return client.get<KanbanEvent[]>('/board/events', params);
+}
+
+// --- Time entries ---
+
+export async function addManualTimeEntry(client: KanbanClient, taskId: string, entry: AddManualTimeEntryRequest): Promise<ManualTimeEntry> {
+    return client.post<ManualTimeEntry>(`/tasks/${taskId}/manual-time-entries`, entry);
+}
+
+export async function getManualTimeEntriesForTask(client: KanbanClient, taskId: string): Promise<ManualTimeEntry[]> {
+    return client.get<ManualTimeEntry[]>(`/tasks/${taskId}/manual-time-entries`);
+}
+
+export async function getTimeEntriesForBoard(
+    client: KanbanClient,
+    from?: string,
+    to?: string,
+    userId?: string,
+    limit?: number
+): Promise<TimeEntry[]> {
+    const params: Record<string, any> = {};
+    if (from) params.from = from;
+    if (to) params.to = to;
+    if (userId) params.userId = userId;
+    if (limit) params.limit = limit;
+    return client.get<TimeEntry[]>('/time-entries', params);
+}
+
+/**
+ * KanbanFlow's /time-entries endpoint is board-wide (filtered by from/to/userId,
+ * not by task), so a per-task view is done by fetching the board-wide window and
+ * filtering client-side by taskId. Callers should pass a from/to window that's
+ * likely to contain the task's activity.
+ */
+export async function getTimeEntriesForTask(
+    client: KanbanClient,
+    taskId: string,
+    from?: string,
+    to?: string
+): Promise<TimeEntry[]> {
+    const entries = await getTimeEntriesForBoard(client, from, to, undefined, 1000);
+    return entries.filter(e => e.taskId === taskId);
+}
