@@ -2,7 +2,7 @@
 
 A Model Context Protocol (MCP) server for [KanbanFlow](https://kanbanflow.com) that lets Claude read and manage tasks, boards, subtasks, labels, dates, comments, time tracking, and more — across **multiple KanbanFlow boards** in a single server, since KanbanFlow issues one API token per board.
 
-This is a rebuild of [williamavholmberg/kanbanflow-mcp-server](https://github.com/williamavholmberg/kanbanflow-mcp-server) (MIT licensed). The core change from the original is that every tool now takes a `board_name` parameter and resolves the right API token from a small config file instead of a single token baked into the environment, plus full coverage of KanbanFlow's REST API rather than a subset.
+There are other MCPs out there, but this now takes a `board_name` parameter and resolves the right API token from a small config file instead of a single token baked into the environment, plus full coverage of KanbanFlow's REST API rather than a subset.
 
 ## What's different from the original repo
 
