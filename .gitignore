@@ -13,6 +13,9 @@ node_modules/
 build/
 dist/
 
+# Packaged extension bundles (build artifacts, not source)
+*.mcpb
+
 # Logs
 *.log
 npm-debug.log*
