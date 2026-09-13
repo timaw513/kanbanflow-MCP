@@ -40,6 +40,29 @@ export interface BoardsConfig {
 
 export type TaskColor = 'yellow' | 'white' | 'red' | 'green' | 'blue' | 'purple' | 'orange' | 'cyan' | 'brown' | 'magenta';
 
+/** The task number consists of an integer value and an optional prefix. Pass null to clear the field. */
+export interface TaskNumber {
+    prefix?: string;
+    value: number;
+}
+
+/** Inline subtask as accepted by Create/Update Task (a subset of the full Subtask shape). */
+export interface InlineSubtask {
+    name: string;
+    finished?: boolean;
+}
+
+/** A collaborator reference as accepted by Create/Update Task. */
+export interface InlineCollaborator {
+    userId: string;
+}
+
+/** A task's timeline: a start and end date, format YYYY-MM-DD. Pass null to clear it. */
+export interface TaskTimeline {
+    start: string;
+    end: string;
+}
+
 export interface CreateTaskRequest {
     name: string;
     columnId: string;
@@ -47,10 +70,14 @@ export interface CreateTaskRequest {
     position?: string | number;
     color?: TaskColor;
     description?: string;
+    number?: TaskNumber | null;
     totalSecondsEstimate?: number;
     pointsEstimate?: number;
     /** Only used if the target column is date grouped. Format YYYY-MM-DD, or null/"" for unknown date. */
     groupingDate?: string | null;
+    timeline?: TaskTimeline | null;
+    subTasks?: InlineSubtask[];
+    collaborators?: InlineCollaborator[];
 }
 
 export interface CreateTaskResponse {
@@ -60,14 +87,19 @@ export interface CreateTaskResponse {
 export interface UpdateTaskRequest {
     name?: string;
     columnId?: string;
+    swimlaneId?: string;
     description?: string;
     color?: TaskColor;
     position?: string | number;
     responsibleUserId?: string;
+    number?: TaskNumber | null;
     totalSecondsEstimate?: number;
     pointsEstimate?: number;
     /** Only used if the target column is date grouped. Format YYYY-MM-DD, or null/"" for unknown date. */
     groupingDate?: string | null;
+    timeline?: TaskTimeline | null;
+    subTasks?: InlineSubtask[];
+    collaborators?: InlineCollaborator[];
 }
 
 export interface KanbanTask {
@@ -87,6 +119,7 @@ export interface KanbanTask {
     totalSecondsEstimate?: number;
     pointsEstimate?: number;
     groupingDate?: string;
+    timeline?: TaskTimeline;
     dates?: any[];
     subTasks?: any[];
     labels?: any[];

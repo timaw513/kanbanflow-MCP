@@ -9,8 +9,9 @@ There are other MCPs out there, but this one takes a `board_name` parameter and 
 - **Multi-board.** A `boards.json` config file lists `{ name, token, boardId }` per board. Every tool takes `board_name` to say which board it should act on.
 - **Bearer auth**, matching KanbanFlow's current API docs.
 - **Full tool coverage** — 32 tools total (see below): board management (`list_boards`, `add_board`, `remove_board`, `sync_board_ids`), full task/subtask/label/comment CRUD, moving tasks between boards, dates, collaborators, attachments, relations, custom fields, users, board events, and time entries (manual, Pomodoro/Stopwatch, per-task and per-board).
-- **`groupingDate`** support on `create_task`, `update_task`, and `move_task_to_board` — lets you set which day a task is grouped under on a column configured to display tasks grouped by date (see below).
-- Verified end-to-end against the live KanbanFlow API before packaging (board fetch, task CRUD, subtasks, labels, comments, manual time entries, users, and custom fields all tested against real boards).
+- **Complete `create_task`/`update_task` field coverage** — including `number`, inline `subTasks`, `collaborators`, `groupingDate`, and `timeline` — matched directly against KanbanFlow's documented fields for those endpoints (see below).
+- **Unrecognized parameters are rejected**, not silently dropped — every tool uses strict schema validation.
+- Verified end-to-end against the live KanbanFlow API before packaging (board fetch, task CRUD with the full field set, subtasks, labels, comments, manual time entries, users, and custom fields all tested against real boards).
 
 ## Installation
 
@@ -81,6 +82,20 @@ Some KanbanFlow columns can be configured to display their cards grouped by day 
 
 It's available as an optional parameter on `create_task`, `update_task`, and `move_task_to_board`.
 
+## What "timeline" means
+
+Separate from `groupingDate`, a task can also carry a `timeline`: a start and end date shown on KanbanFlow's timeline/Gantt-style view. It's an object, not a pair of top-level fields:
+
+```json
+{ "start": "2024-01-01", "end": "2024-01-31" }
+```
+
+Pass `null` to clear it. It's available on `create_task` and `update_task`.
+
+## Unknown parameters are rejected, not dropped
+
+Every tool's parameters are validated with a strict schema: if a call includes a parameter name that isn't recognized (a typo, or a field that doesn't exist on that tool), the call fails with a clear error naming the unrecognized key, rather than silently ignoring it and proceeding as if that parameter had never been passed. This surfaces mistakes immediately instead of letting them fail silently.
+
 ## Tools
 
 32 tools in total. `board_name` is required on every tool except `list_boards`, `add_board`, and (optionally) `sync_board_ids`.
@@ -100,11 +115,11 @@ It's available as an optional parameter on `create_task`, `update_task`, and `mo
 ### Tasks
 | Tool | Description |
 |---|---|
-| `create_task` | Create a task (name, column, swimlane, description, color, position, time/points estimate, groupingDate). |
+| `create_task` | Create a task (name, column, swimlane, description, color, position, number, time/points estimate, groupingDate, timeline, inline subtasks, collaborators). |
 | `get_task` | Get full details for a task by ID. |
 | `get_tasks_by_column` | List tasks in a specific column (optionally filtered to a swimlane). |
 | `get_all_tasks` | List every task on a board, grouped by column. |
-| `update_task` | Update any of a task's fields, including moving it to another column. |
+| `update_task` | Update any of a task's fields (name, column, swimlane, description, color, position, responsible user, number, time/points estimate, groupingDate, timeline, inline subtasks, collaborators). Only supply the properties you want to change. |
 | `delete_task` | Permanently delete a task. |
 | `move_task_to_board` | Move a task from one configured board to another (optionally to a specific column/swimlane/groupingDate). |
 

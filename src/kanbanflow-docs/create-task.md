@@ -29,3 +29,4 @@ dates	Array	Optional. A date requires a dueTimestamp and a targetColumnId. See C
 subTasks	Array	Optional. A subtask consists of a name and an optional finished flag. See Create subtask for more details. Examples: { "name": "Write", "finished": true }, { "name": "Proofread" }
 labels	Array	Optional. A label consists of a name and an optional pinned flag. See Create label for more details. Examples: { "name": "Project X" }, { "name": "Priority", "pinned": true }
 collaborators	Array	Optional. A collaborator consists of a userId. See Add collaborator for more details. Examples: { "userId": "UHJ9JgtA" }
+timeline	Object	Optional. A timeline consists of a start and an end date. Valid format is YYYY-MM-DD, e.g. 2023-12-31.

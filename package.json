@@ -1,6 +1,6 @@
 {
     "name": "kanbanflow-mcp-server",
-    "version": "2.0.0",
+    "version": "2.1.0",
     "description": "Multi-board Model Context Protocol (MCP) server for KanbanFlow - manage multiple boards, tasks, and workflows from Claude via a board_name parameter and a boards.json config file",
     "main": "build/index.js",
     "type": "module",
@@ -40,7 +40,7 @@
         "url": "https://github.com/timaw513/kanbanflow-MCP/issues"
     },
     "dependencies": {
-        "@modelcontextprotocol/sdk": "^1.4.0",
+        "@modelcontextprotocol/sdk": "^1.30.0",
         "axios": "^1.7.9",
         "zod": "^3.23.8"
     },

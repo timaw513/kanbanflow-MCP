@@ -12,14 +12,38 @@ const registry = new BoardRegistry();
 
 const server = new McpServer({
     name: "kanban-flow",
-    version: "2.0.0",
+    version: "2.1.0",
 });
 
 // ---------- helpers ----------
 
+/**
+ * Wraps a tool's parameter shape in a strict Zod object so unrecognized parameters are
+ * rejected with a clear error instead of being silently dropped by the MCP SDK's default
+ * (non-strict) object parsing.
+ */
+function strict<T extends z.ZodRawShape>(shape: T) {
+    return z.object(shape).strict();
+}
+
 const boardNameParam = z.string().describe("Name of the configured board to operate on (see list_boards)");
 const colorEnum = z.enum(['yellow', 'white', 'red', 'green', 'blue', 'purple', 'orange', 'cyan', 'brown', 'magenta']);
 const groupingDateParam = z.string().nullable().optional().describe("Only used if the target column is date grouped. Format YYYY-MM-DD, e.g. 2023-12-31. Use null or empty string to group as unknown date.");
+const numberParam = z.object({
+    prefix: z.string().optional(),
+    value: z.number(),
+}).nullable().optional().describe("The task number: an integer value with an optional prefix, e.g. { value: 5 } or { prefix: 'BUG-', value: 5 }. Pass null to clear it.");
+const subTasksParam = z.array(z.object({
+    name: z.string(),
+    finished: z.boolean().optional(),
+})).optional().describe("Inline subtasks to set, e.g. [{ name: 'Write', finished: true }, { name: 'Proofread' }]. Overwrites any existing subtasks - use create_subtask to add one without replacing the rest.");
+const collaboratorsParam = z.array(z.object({
+    userId: z.string(),
+})).optional().describe("Collaborators to set, as a list of { userId }. Overwrites the existing collaborator list.");
+const timelineParam = z.object({
+    start: z.string().describe("YYYY-MM-DD"),
+    end: z.string().describe("YYYY-MM-DD"),
+}).nullable().optional().describe("The task's timeline: a start and end date, e.g. { start: '2024-01-01', end: '2024-01-31' }. Pass null to clear it.");
 
 function text(t: string) {
     return { content: [{ type: "text" as const, text: t }] };
@@ -69,12 +93,16 @@ function formatTaskDetails(task: KanbanTask): string {
     if (task.totalSecondsEstimate) out += `- Time Estimate: ${task.totalSecondsEstimate} seconds\n`;
     if (task.pointsEstimate) out += `- Points Estimate: ${task.pointsEstimate}\n`;
     if (task.groupingDate) out += `- Grouping Date: ${task.groupingDate}\n`;
+    if (task.timeline) out += `- Timeline: ${task.timeline.start} -> ${task.timeline.end}\n`;
     if (task.subTasks && task.subTasks.length > 0) {
         out += `- Subtasks (${task.subTasks.length}):\n`;
         task.subTasks.forEach((s: any, i: number) => out += `  ${i + 1}. ${s.finished ? '✅' : '⬜'} ${s.name || 'Unnamed'}\n`);
     }
     if (task.labels && task.labels.length > 0) {
         out += `- Labels: ${task.labels.map((l: any) => l.name).join(', ')}\n`;
+    }
+    if (task.collaborators && task.collaborators.length > 0) {
+        out += `- Collaborators: ${task.collaborators.map((c: any) => c.userId).join(', ')}\n`;
     }
     if (task.dates && task.dates.length > 0) {
         out += `- Dates: ${task.dates.length} date(s) set\n`;
@@ -118,10 +146,12 @@ function parseCsv(content: string): Record<string, string>[] {
 
 // ---------- board / config management ----------
 
-server.tool(
+server.registerTool(
     "list_boards",
-    "List all configured KanbanFlow board names. API tokens are never exposed.",
-    {},
+    {
+        description: "List all configured KanbanFlow board names. API tokens are never exposed.",
+        inputSchema: strict({}),
+    },
     async () => {
         try {
             const boards = await registry.listBoards();
@@ -135,12 +165,14 @@ server.tool(
     }
 );
 
-server.tool(
+server.registerTool(
     "add_board",
-    "Add a new board to the config by name and API token. Fetches the board to confirm the token works and to capture its board ID.",
     {
+        description: "Add a new board to the config by name and API token. Fetches the board to confirm the token works and to capture its board ID.",
+        inputSchema: strict({
         name: z.string().describe("A short name you'll use to refer to this board in other tool calls"),
         token: z.string().describe("KanbanFlow API token for this board (Settings > API & Webhooks)"),
+    }),
     },
     async ({ name, token }) => {
         try {
@@ -152,10 +184,12 @@ server.tool(
     }
 );
 
-server.tool(
+server.registerTool(
     "remove_board",
-    "Remove a configured board by name.",
-    { board_name: boardNameParam },
+    {
+        description: "Remove a configured board by name.",
+        inputSchema: strict({ board_name: boardNameParam }),
+    },
     async ({ board_name }) => {
         try {
             await registry.removeBoard(board_name);
@@ -166,10 +200,12 @@ server.tool(
     }
 );
 
-server.tool(
+server.registerTool(
     "sync_board_ids",
-    "Re-fetch one (or all, if board_name omitted) configured board(s) from KanbanFlow and update the stored board ID if it changed.",
-    { board_name: z.string().optional().describe("Board to sync; omit to sync all configured boards") },
+    {
+        description: "Re-fetch one (or all, if board_name omitted) configured board(s) from KanbanFlow and update the stored board ID if it changed.",
+        inputSchema: strict({ board_name: z.string().optional().describe("Board to sync; omit to sync all configured boards") }),
+    },
     async ({ board_name }) => {
         try {
             const results = await registry.syncBoardIds(board_name);
@@ -187,10 +223,12 @@ server.tool(
 
 // ---------- board ----------
 
-server.tool(
+server.registerTool(
     "get_board",
-    "Get full board details: columns, swimlanes, colors, settings.",
-    { board_name: boardNameParam },
+    {
+        description: "Get full board details: columns, swimlanes, colors, settings.",
+        inputSchema: strict({ board_name: boardNameParam }),
+    },
     async ({ board_name }) => {
         try {
             const client = await registry.getClient(board_name);
@@ -202,10 +240,12 @@ server.tool(
     }
 );
 
-server.tool(
+server.registerTool(
     "get_board_custom_fields",
-    "Get the custom field definitions available on the board.",
-    { board_name: boardNameParam },
+    {
+        description: "Get the custom field definitions available on the board.",
+        inputSchema: strict({ board_name: boardNameParam }),
+    },
     async ({ board_name }) => {
         try {
             const client = await registry.getClient(board_name);
@@ -218,15 +258,17 @@ server.tool(
     }
 );
 
-server.tool(
+server.registerTool(
     "get_board_events",
-    "Get board-level events (audit log) within an optional time window.",
     {
+        description: "Get board-level events (audit log) within an optional time window.",
+        inputSchema: strict({
         board_name: boardNameParam,
         from: z.string().optional().describe("Start timestamp, ISO 8601 or epoch ms"),
         to: z.string().optional().describe("End timestamp, ISO 8601 or epoch ms"),
         limit: z.number().optional().describe("Max events to return (default/max 100)"),
         order: z.enum(['ascending', 'descending']).optional(),
+    }),
     },
     async ({ board_name, from, to, limit, order }) => {
         try {
@@ -240,10 +282,12 @@ server.tool(
     }
 );
 
-server.tool(
+server.registerTool(
     "get_users",
-    "Get all users who have access to the board.",
-    { board_name: boardNameParam },
+    {
+        description: "Get all users who have access to the board.",
+        inputSchema: strict({ board_name: boardNameParam }),
+    },
     async ({ board_name }) => {
         try {
             const client = await registry.getClient(board_name);
@@ -257,10 +301,11 @@ server.tool(
 
 // ---------- tasks ----------
 
-server.tool(
+server.registerTool(
     "create_task",
-    "Create a new task on the board",
     {
+        description: "Create a new task on the board",
+        inputSchema: strict({
         board_name: boardNameParam,
         name: z.string().describe("Name of the task"),
         column_id: z.string().describe("ID of the column to create the task in"),
@@ -268,11 +313,16 @@ server.tool(
         description: z.string().optional(),
         color: colorEnum.optional(),
         position: z.union([z.string(), z.number()]).optional(),
+        number: numberParam,
         totalSecondsEstimate: z.number().optional(),
         pointsEstimate: z.number().optional(),
         groupingDate: groupingDateParam,
+        timeline: timelineParam,
+        subTasks: subTasksParam,
+        collaborators: collaboratorsParam,
+    }),
     },
-    async ({ board_name, name, column_id, swimlane_id, description, color, position, totalSecondsEstimate, pointsEstimate, groupingDate }) => {
+    async ({ board_name, name, column_id, swimlane_id, description, color, position, number, totalSecondsEstimate, pointsEstimate, groupingDate, timeline, subTasks, collaborators }) => {
         try {
             const client = await registry.getClient(board_name);
             const task = await kanban.createTask(client, {
@@ -282,9 +332,13 @@ server.tool(
                 description,
                 color,
                 position,
+                number,
                 totalSecondsEstimate,
                 pointsEstimate,
                 groupingDate,
+                timeline,
+                subTasks,
+                collaborators,
             });
             return text(`Successfully created task!\nTask ID: ${task.taskId}`);
         } catch (error: any) {
@@ -293,13 +347,15 @@ server.tool(
     }
 );
 
-server.tool(
+server.registerTool(
     "get_task",
-    "Get detailed information about a specific task by its ID",
     {
+        description: "Get detailed information about a specific task by its ID",
+        inputSchema: strict({
         board_name: boardNameParam,
         task_id: z.string(),
         includePosition: z.boolean().optional(),
+    }),
     },
     async ({ board_name, task_id, includePosition }) => {
         try {
@@ -312,13 +368,15 @@ server.tool(
     }
 );
 
-server.tool(
+server.registerTool(
     "get_tasks_by_column",
-    "Get tasks filtered by column ID. swimlane_id is optional.",
     {
+        description: "Get tasks filtered by column ID. swimlane_id is optional.",
+        inputSchema: strict({
         board_name: boardNameParam,
         column_id: z.string(),
         swimlane_id: z.string().optional(),
+    }),
     },
     async ({ board_name, column_id, swimlane_id }) => {
         try {
@@ -331,10 +389,12 @@ server.tool(
     }
 );
 
-server.tool(
+server.registerTool(
     "get_all_tasks",
-    "Get every task on a board.",
-    { board_name: boardNameParam },
+    {
+        description: "Get every task on a board.",
+        inputSchema: strict({ board_name: boardNameParam }),
+    },
     async ({ board_name }) => {
         try {
             const client = await registry.getClient(board_name);
@@ -354,35 +414,47 @@ server.tool(
     }
 );
 
-server.tool(
+server.registerTool(
     "update_task",
-    "Update a task (name, description, color, column, position, estimates, grouping date).",
     {
+        description: "Update a task (name, description, color, column, swimlane, position, number, estimates, subtasks, collaborators, grouping date, timeline). Only supply the properties you want to change.",
+        inputSchema: strict({
         board_name: boardNameParam,
         task_id: z.string(),
         name: z.string().optional(),
         column_id: z.string().optional().describe("Move task to this column ID"),
+        swimlane_id: z.string().optional().describe("Move task to this swimlane ID"),
         description: z.string().optional(),
         color: colorEnum.optional(),
         position: z.union([z.string(), z.number()]).optional(),
         responsibleUserId: z.string().optional(),
+        number: numberParam,
         totalSecondsEstimate: z.number().optional(),
         pointsEstimate: z.number().optional(),
         groupingDate: groupingDateParam,
+        timeline: timelineParam,
+        subTasks: subTasksParam,
+        collaborators: collaboratorsParam,
+    }),
     },
-    async ({ board_name, task_id, name, column_id, description, color, position, responsibleUserId, totalSecondsEstimate, pointsEstimate, groupingDate }) => {
+    async ({ board_name, task_id, name, column_id, swimlane_id, description, color, position, responsibleUserId, number, totalSecondsEstimate, pointsEstimate, groupingDate, timeline, subTasks, collaborators }) => {
         try {
             const client = await registry.getClient(board_name);
             const updates: any = {};
             if (name !== undefined) updates.name = name;
             if (column_id !== undefined) updates.columnId = column_id;
+            if (swimlane_id !== undefined) updates.swimlaneId = swimlane_id;
             if (description !== undefined) updates.description = description;
             if (color !== undefined) updates.color = color;
             if (position !== undefined) updates.position = position;
             if (responsibleUserId !== undefined) updates.responsibleUserId = responsibleUserId;
+            if (number !== undefined) updates.number = number;
             if (totalSecondsEstimate !== undefined) updates.totalSecondsEstimate = totalSecondsEstimate;
             if (pointsEstimate !== undefined) updates.pointsEstimate = pointsEstimate;
             if (groupingDate !== undefined) updates.groupingDate = groupingDate;
+            if (timeline !== undefined) updates.timeline = timeline;
+            if (subTasks !== undefined) updates.subTasks = subTasks;
+            if (collaborators !== undefined) updates.collaborators = collaborators;
 
             await kanban.updateTask(client, task_id, updates);
             const updated = await kanban.getTaskById(client, task_id);
@@ -393,10 +465,12 @@ server.tool(
     }
 );
 
-server.tool(
+server.registerTool(
     "delete_task",
-    "Permanently delete a task.",
-    { board_name: boardNameParam, task_id: z.string() },
+    {
+        description: "Permanently delete a task.",
+        inputSchema: strict({ board_name: boardNameParam, task_id: z.string() }),
+    },
     async ({ board_name, task_id }) => {
         try {
             const client = await registry.getClient(board_name);
@@ -408,16 +482,18 @@ server.tool(
     }
 );
 
-server.tool(
+server.registerTool(
     "move_task_to_board",
-    "Move a task from one configured board to another (or another column/swimlane on a different board).",
     {
+        description: "Move a task from one configured board to another (or another column/swimlane on a different board).",
+        inputSchema: strict({
         board_name: boardNameParam.describe("The board the task currently lives on"),
         task_id: z.string(),
         target_board_name: z.string().describe("The configured board to move the task to"),
         column_id: z.string().optional().describe("Target column ID; defaults to the target board's first column"),
         swimlane_id: z.string().optional(),
         groupingDate: groupingDateParam,
+    }),
     },
     async ({ board_name, task_id, target_board_name, column_id, swimlane_id, groupingDate }) => {
         try {
@@ -437,10 +513,11 @@ server.tool(
 
 // ---------- subtasks ----------
 
-server.tool(
+server.registerTool(
     "create_subtask",
-    "Add a subtask to an existing task.",
     {
+        description: "Add a subtask to an existing task.",
+        inputSchema: strict({
         board_name: boardNameParam,
         task_id: z.string(),
         name: z.string(),
@@ -448,6 +525,7 @@ server.tool(
         userId: z.string().optional(),
         dueDateTimestamp: z.string().optional(),
         dueDateTimestampLocal: z.string().optional(),
+    }),
     },
     async ({ board_name, task_id, name, finished, userId, dueDateTimestamp, dueDateTimestampLocal }) => {
         try {
@@ -460,10 +538,12 @@ server.tool(
     }
 );
 
-server.tool(
+server.registerTool(
     "get_subtasks",
-    "Get all subtasks for a task.",
-    { board_name: boardNameParam, task_id: z.string() },
+    {
+        description: "Get all subtasks for a task.",
+        inputSchema: strict({ board_name: boardNameParam, task_id: z.string() }),
+    },
     async ({ board_name, task_id }) => {
         try {
             const client = await registry.getClient(board_name);
@@ -478,10 +558,12 @@ server.tool(
 
 // ---------- labels ----------
 
-server.tool(
+server.registerTool(
     "create_label",
-    "Add a label to a task.",
-    { board_name: boardNameParam, task_id: z.string(), name: z.string(), pinned: z.boolean().optional() },
+    {
+        description: "Add a label to a task.",
+        inputSchema: strict({ board_name: boardNameParam, task_id: z.string(), name: z.string(), pinned: z.boolean().optional() }),
+    },
     async ({ board_name, task_id, name, pinned }) => {
         try {
             const client = await registry.getClient(board_name);
@@ -493,10 +575,12 @@ server.tool(
     }
 );
 
-server.tool(
+server.registerTool(
     "get_labels",
-    "Get all labels on a task.",
-    { board_name: boardNameParam, task_id: z.string() },
+    {
+        description: "Get all labels on a task.",
+        inputSchema: strict({ board_name: boardNameParam, task_id: z.string() }),
+    },
     async ({ board_name, task_id }) => {
         try {
             const client = await registry.getClient(board_name);
@@ -511,10 +595,11 @@ server.tool(
 
 // ---------- dates ----------
 
-server.tool(
+server.registerTool(
     "set_date",
-    "Set or update the due date on a task. due_timestamp required (ISO 8601 UTC). due_timestamp_local and target_column_id optional.",
     {
+        description: "Set or update the due date on a task. due_timestamp required (ISO 8601 UTC). due_timestamp_local and target_column_id optional.",
+        inputSchema: strict({
         board_name: boardNameParam,
         task_id: z.string(),
         due_timestamp: z.string().describe("ISO 8601 UTC e.g. 2024-03-01T12:00:00Z"),
@@ -522,6 +607,7 @@ server.tool(
         due_timestamp_local: z.string().optional().describe("ISO 8601 with offset e.g. 2024-03-01T13:00:00+01:00"),
         dateType: z.string().optional(),
         status: z.enum(['active', 'done']).optional(),
+    }),
     },
     async ({ board_name, task_id, due_timestamp, target_column_id, due_timestamp_local, dateType, status }) => {
         try {
@@ -540,10 +626,12 @@ server.tool(
     }
 );
 
-server.tool(
+server.registerTool(
     "get_dates",
-    "Get date/due-date information for a task.",
-    { board_name: boardNameParam, task_id: z.string() },
+    {
+        description: "Get date/due-date information for a task.",
+        inputSchema: strict({ board_name: boardNameParam, task_id: z.string() }),
+    },
     async ({ board_name, task_id }) => {
         try {
             const client = await registry.getClient(board_name);
@@ -558,10 +646,12 @@ server.tool(
 
 // ---------- collaborators ----------
 
-server.tool(
+server.registerTool(
     "get_collaborators",
-    "Get collaborators on a task.",
-    { board_name: boardNameParam, task_id: z.string() },
+    {
+        description: "Get collaborators on a task.",
+        inputSchema: strict({ board_name: boardNameParam, task_id: z.string() }),
+    },
     async ({ board_name, task_id }) => {
         try {
             const client = await registry.getClient(board_name);
@@ -576,15 +666,17 @@ server.tool(
 
 // ---------- comments ----------
 
-server.tool(
+server.registerTool(
     "add_comment",
-    "Add a comment to a task.",
     {
+        description: "Add a comment to a task.",
+        inputSchema: strict({
         board_name: boardNameParam,
         task_id: z.string(),
         text: z.string(),
         authorUserId: z.string().optional(),
         createdTimestamp: z.string().optional(),
+    }),
     },
     async ({ board_name, task_id, text: commentText, authorUserId, createdTimestamp }) => {
         try {
@@ -597,10 +689,12 @@ server.tool(
     }
 );
 
-server.tool(
+server.registerTool(
     "get_comments",
-    "Get comments on a task.",
-    { board_name: boardNameParam, task_id: z.string() },
+    {
+        description: "Get comments on a task.",
+        inputSchema: strict({ board_name: boardNameParam, task_id: z.string() }),
+    },
     async ({ board_name, task_id }) => {
         try {
             const client = await registry.getClient(board_name);
@@ -615,10 +709,12 @@ server.tool(
 
 // ---------- attachments ----------
 
-server.tool(
+server.registerTool(
     "get_attachments",
-    "Get attachments on a task.",
-    { board_name: boardNameParam, task_id: z.string() },
+    {
+        description: "Get attachments on a task.",
+        inputSchema: strict({ board_name: boardNameParam, task_id: z.string() }),
+    },
     async ({ board_name, task_id }) => {
         try {
             const client = await registry.getClient(board_name);
@@ -633,10 +729,12 @@ server.tool(
 
 // ---------- relations ----------
 
-server.tool(
+server.registerTool(
     "get_relations",
-    "Get task relations (relatesTo/dependsOn/requiredBy).",
-    { board_name: boardNameParam, task_id: z.string() },
+    {
+        description: "Get task relations (relatesTo/dependsOn/requiredBy).",
+        inputSchema: strict({ board_name: boardNameParam, task_id: z.string() }),
+    },
     async ({ board_name, task_id }) => {
         try {
             const client = await registry.getClient(board_name);
@@ -651,10 +749,12 @@ server.tool(
 
 // ---------- custom fields ----------
 
-server.tool(
+server.registerTool(
     "get_task_custom_fields",
-    "Get custom field values set on a task.",
-    { board_name: boardNameParam, task_id: z.string() },
+    {
+        description: "Get custom field values set on a task.",
+        inputSchema: strict({ board_name: boardNameParam, task_id: z.string() }),
+    },
     async ({ board_name, task_id }) => {
         try {
             const client = await registry.getClient(board_name);
@@ -669,10 +769,11 @@ server.tool(
 
 // ---------- time tracking ----------
 
-server.tool(
+server.registerTool(
     "add_manual_time_entry",
-    "Add a manual time entry to a task using ISO 8601 start and end timestamps.",
     {
+        description: "Add a manual time entry to a task using ISO 8601 start and end timestamps.",
+        inputSchema: strict({
         board_name: boardNameParam,
         task_id: z.string(),
         start_timestamp: z.string().describe("ISO 8601 UTC e.g. 2024-01-02T08:30:00Z"),
@@ -680,6 +781,7 @@ server.tool(
         userId: z.string().optional(),
         comment: z.string().optional().describe("Max 50 characters"),
         labelNames: z.array(z.string()).optional(),
+    }),
     },
     async ({ board_name, task_id, start_timestamp, end_timestamp, userId, comment, labelNames }) => {
         try {
@@ -698,10 +800,12 @@ server.tool(
     }
 );
 
-server.tool(
+server.registerTool(
     "get_manual_time_entries_for_task",
-    "Get manual time entries logged on a specific task.",
-    { board_name: boardNameParam, task_id: z.string() },
+    {
+        description: "Get manual time entries logged on a specific task.",
+        inputSchema: strict({ board_name: boardNameParam, task_id: z.string() }),
+    },
     async ({ board_name, task_id }) => {
         try {
             const client = await registry.getClient(board_name);
@@ -714,14 +818,16 @@ server.tool(
     }
 );
 
-server.tool(
+server.registerTool(
     "get_time_entries_for_task",
-    "Get all time entries (manual, Pomodoro, Stopwatch) for a specific task within a time window.",
     {
+        description: "Get all time entries (manual, Pomodoro, Stopwatch) for a specific task within a time window.",
+        inputSchema: strict({
         board_name: boardNameParam,
         task_id: z.string(),
         from: z.string().optional().describe("Start timestamp, ISO 8601 or epoch ms (from or to required)"),
         to: z.string().optional().describe("End timestamp, ISO 8601 or epoch ms (from or to required)"),
+    }),
     },
     async ({ board_name, task_id, from, to }) => {
         try {
@@ -735,15 +841,17 @@ server.tool(
     }
 );
 
-server.tool(
+server.registerTool(
     "get_time_entries_for_board",
-    "Get all time entries (manual, Pomodoro, Stopwatch) for the board within a time window.",
     {
+        description: "Get all time entries (manual, Pomodoro, Stopwatch) for the board within a time window.",
+        inputSchema: strict({
         board_name: boardNameParam,
         from: z.string().optional().describe("Start timestamp, ISO 8601 or epoch ms (from or to required)"),
         to: z.string().optional().describe("End timestamp, ISO 8601 or epoch ms (from or to required)"),
         userId: z.string().optional(),
         limit: z.number().optional().describe("Max 1000, default 100"),
+    }),
     },
     async ({ board_name, from, to, userId, limit }) => {
         try {
@@ -759,13 +867,15 @@ server.tool(
 
 // ---------- bulk import ----------
 
-server.tool(
+server.registerTool(
     "import_csv",
-    "Bulk-create tasks on a board from CSV content. Required column: name. Optional columns: description, color, swimlaneId, position.",
     {
+        description: "Bulk-create tasks on a board from CSV content. Required column: name. Optional columns: description, color, swimlaneId, position.",
+        inputSchema: strict({
         board_name: boardNameParam,
         column_id: z.string().describe("Column ID every row will be created in"),
         csv_content: z.string().describe("Raw CSV text, first row = headers"),
+    }),
     },
     async ({ board_name, column_id, csv_content }) => {
         try {

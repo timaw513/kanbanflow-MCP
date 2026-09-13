@@ -26,3 +26,4 @@ subTasks	Array	A subtask consists of a name and an optional finished flag. See C
 labels	Array	A label consists of a name and an optional pinned flag. See Create label for more details. Examples: { "name": "Project X" }, { "name": "Priority", "pinned": true }
 collaborators	Array	A collaborator consists of a userId. See Add collaborator for more details. Examples: { "userId": "UHJ9JgtA" }
 customFields	Array	The custom fields set on the task. See Create/update custom fields for details. Examples: { "customFieldId": "g3aB3m", "value": { "text": "London" } }, { "customFieldId": "91yRUs", "value": { "number": 123.45 } }
+timeline	Object	A timeline consists of a start and an end date. Valid format is YYYY-MM-DD, e.g. 2023-12-31. If you want to clear the field use null as value without any quotes. Example: { "start": "2024-01-01", "end": "2024-01-31" }
