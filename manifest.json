@@ -1,0 +1,53 @@
+{
+  "manifest_version": "0.3",
+  "name": "kanbanflow-mcp-server",
+  "display_name": "KanbanFlow MCP Server",
+  "version": "1.1.0",
+  "description": "MCP server for KanbanFlow - manage boards, tasks, and workflows. Fork adds groupingDate support to create-task/update-task.",
+  "long_description": "Model Context Protocol (MCP) server for KanbanFlow - manage boards, tasks, and workflows from Claude. This is a local fork of William Holmberg's kanbanflow-mcp-server (MIT licensed) with one addition: the create-task and update-task tools now accept an optional groupingDate parameter (YYYY-MM-DD, or null/empty string for unknown date), matching KanbanFlow's own Create Task API. This only has a visible effect on columns configured as 'date grouped' in KanbanFlow.",
+  "author": {
+    "name": "Tim Williams",
+    "email": "tim@developmentconsultingpartners.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/williamavholmberg/kanbanflow-mcp-server"
+  },
+  "homepage": "https://github.com/williamavholmberg/kanbanflow-mcp-server",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "kanbanflow",
+    "kanban",
+    "claude",
+    "productivity",
+    "task-management"
+  ],
+  "server": {
+    "type": "node",
+    "entry_point": "build/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/build/index.js"],
+      "env": {
+        "KANBAN_API_TOKEN": "${user_config.kanban_api_token}"
+      }
+    }
+  },
+  "user_config": {
+    "kanban_api_token": {
+      "type": "string",
+      "title": "KanbanFlow API Token",
+      "description": "Your KanbanFlow API token, from kanbanflow.com/api",
+      "required": true,
+      "sensitive": true
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": {
+      "node": ">=18"
+    }
+  }
+}

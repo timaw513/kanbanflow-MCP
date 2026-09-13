@@ -70,13 +70,15 @@ server.tool(
         name: z.string().describe("Name of the task"),
         columnId: z.string().describe("ID of the column to create the task in"),
         description: z.string().optional().describe("Optional task description"),
+        groupingDate: z.string().nullable().optional().describe("Only used if the target column is date grouped. Format YYYY-MM-DD, e.g. 2023-12-31. Use null or empty string to group as unknown date."),
     },
-    async ({ name, columnId, description }) => {
+    async ({ name, columnId, description, groupingDate }) => {
         try {
             const task = await kanbanService.createTask({
                 name,
                 columnId,
                 description,
+                groupingDate,
             });
 
             return {
@@ -213,8 +215,9 @@ server.tool(
         responsibleUserId: z.string().optional().describe("ID of the user responsible for the task"),
         totalSecondsEstimate: z.number().optional().describe("Estimated time in seconds"),
         pointsEstimate: z.number().optional().describe("Points estimate for the task"),
+        groupingDate: z.string().nullable().optional().describe("Only used if the target column is date grouped. Format YYYY-MM-DD, e.g. 2023-12-31. Use null or empty string to group as unknown date."),
     },
-    async ({ taskId, name, columnId, description, color, position, responsibleUserId, totalSecondsEstimate, pointsEstimate }) => {
+    async ({ taskId, name, columnId, description, color, position, responsibleUserId, totalSecondsEstimate, pointsEstimate, groupingDate }) => {
         try {
             // Build update object with only provided properties
             const updates: any = {};
@@ -226,6 +229,7 @@ server.tool(
             if (responsibleUserId !== undefined) updates.responsibleUserId = responsibleUserId;
             if (totalSecondsEstimate !== undefined) updates.totalSecondsEstimate = totalSecondsEstimate;
             if (pointsEstimate !== undefined) updates.pointsEstimate = pointsEstimate;
+            if (groupingDate !== undefined) updates.groupingDate = groupingDate;
 
             await kanbanService.updateTask(taskId, updates);
 

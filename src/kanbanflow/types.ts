@@ -31,6 +31,8 @@ export interface CreateTaskRequest {
     description?: string;
     totalSecondsEstimate?: number;
     pointsEstimate?: number;
+    /** Only used if the target column is date grouped. Format YYYY-MM-DD, or null/"" for unknown date. */
+    groupingDate?: string | null;
 }
 
 export interface CreateTaskResponse {
@@ -46,6 +48,8 @@ export interface UpdateTaskRequest {
     responsibleUserId?: string;
     totalSecondsEstimate?: number;
     pointsEstimate?: number;
+    /** Only used if the target column is date grouped. Format YYYY-MM-DD, or null/"" for unknown date. */
+    groupingDate?: string | null;
 }
 
 export interface AddSubtaskRequest {
