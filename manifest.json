@@ -4,16 +4,16 @@
   "display_name": "KanbanFlow MCP Server (multi-board)",
   "version": "2.0.0",
   "description": "Multi-board KanbanFlow MCP server: every tool takes board_name, resolved via a boards.json config file. Covers ~30 tools (tasks, subtasks, labels, dates, comments, time entries, custom fields, users, board management) plus groupingDate support.",
-  "long_description": "Model Context Protocol (MCP) server for KanbanFlow, rebuilt from William Holmberg's kanbanflow-mcp-server (MIT licensed) into a multi-board server matching the local setup already in use: a boards.json config file (default ~/.kanbanflow/boards.json, override with KANBANFLOW_BOARDS_CONFIG) lists { name, token, boardId } entries, one per KanbanFlow board (KanbanFlow API tokens are per-board). Every tool takes a board_name parameter to pick which board it acts on. Adds list_boards/add_board/remove_board/sync_board_ids to manage that config, move_task_to_board to move a task between configured boards, and full coverage of tasks, subtasks, labels, dates, collaborators, comments, attachments, relations, custom fields, users, board events, time entries (manual/board/task), and CSV bulk-import. create_task/update_task/move_task_to_board also accept an optional groupingDate (YYYY-MM-DD, or null/empty for unknown date) matching KanbanFlow's own API - only meaningful on a column configured as date grouped. Authenticates with Bearer tokens per KanbanFlow's current API docs; verified end-to-end against the live API before packaging.",
+  "long_description": "Model Context Protocol (MCP) server for KanbanFlow: a multi-board server where a boards.json config file (default ~/.kanbanflow/boards.json, override with KANBANFLOW_BOARDS_CONFIG) lists { name, token, boardId } entries, one per KanbanFlow board (KanbanFlow API tokens are per-board). Every tool takes a board_name parameter to pick which board it acts on. Includes list_boards/add_board/remove_board/sync_board_ids to manage that config, move_task_to_board to move a task between configured boards, and full coverage of tasks, subtasks, labels, dates, collaborators, comments, attachments, relations, custom fields, users, board events, time entries (manual/board/task), and CSV bulk-import. create_task/update_task/move_task_to_board also accept an optional groupingDate (YYYY-MM-DD, or null/empty for unknown date) matching KanbanFlow's own API - only meaningful on a column configured as date grouped. Authenticates with Bearer tokens per KanbanFlow's current API docs; verified end-to-end against the live API before packaging.",
   "author": {
     "name": "Tim Williams",
     "email": "tim@developmentconsultingpartners.com"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/williamavholmberg/kanbanflow-mcp-server"
+    "url": "https://github.com/timaw513/kanbanflow-MCP"
   },
-  "homepage": "https://github.com/williamavholmberg/kanbanflow-mcp-server",
+  "homepage": "https://github.com/timaw513/kanbanflow-MCP",
   "license": "MIT",
   "keywords": [
     "mcp",

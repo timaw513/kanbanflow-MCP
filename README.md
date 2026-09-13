@@ -2,13 +2,13 @@
 
 A Model Context Protocol (MCP) server for [KanbanFlow](https://kanbanflow.com) that lets Claude read and manage tasks, boards, subtasks, labels, dates, comments, time tracking, and more — across **multiple KanbanFlow boards** in a single server, since KanbanFlow issues one API token per board.
 
-There are other MCPs out there, but this now takes a `board_name` parameter and resolves the right API token from a small config file instead of a single token baked into the environment, plus full coverage of KanbanFlow's REST API rather than a subset.
+There are other MCPs out there, but this one takes a `board_name` parameter and resolves the right API token from a small config file instead of a single token baked into the environment, plus full coverage of KanbanFlow's REST API rather than a subset.
 
-## What's different from the original repo
+## Highlights
 
 - **Multi-board.** A `boards.json` config file lists `{ name, token, boardId }` per board. Every tool takes `board_name` to say which board it should act on.
-- **Bearer auth.** Uses `Authorization: Bearer <token>`, matching KanbanFlow's current API docs (the original repo used an older Basic-auth style).
-- **Full tool coverage** — 32 tools total (see below), not just the original's task/subtask/label/comment subset. Added: board management (`list_boards`, `add_board`, `remove_board`, `sync_board_ids`), moving tasks between boards, dates, collaborators, attachments, relations, custom fields, users, board events, and time entries (manual, Pomodoro/Stopwatch, per-task and per-board).
+- **Bearer auth**, matching KanbanFlow's current API docs.
+- **Full tool coverage** — 32 tools total (see below): board management (`list_boards`, `add_board`, `remove_board`, `sync_board_ids`), full task/subtask/label/comment CRUD, moving tasks between boards, dates, collaborators, attachments, relations, custom fields, users, board events, and time entries (manual, Pomodoro/Stopwatch, per-task and per-board).
 - **`groupingDate`** support on `create_task`, `update_task`, and `move_task_to_board` — lets you set which day a task is grouped under on a column configured to display tasks grouped by date (see below).
 - Verified end-to-end against the live KanbanFlow API before packaging (board fetch, task CRUD, subtasks, labels, comments, manual time entries, users, and custom fields all tested against real boards).
 
@@ -192,4 +192,4 @@ mcpb pack . kanbanflow-mcp-server.mcpb
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Originally based on [williamavholmberg/kanbanflow-mcp-server](https://github.com/williamavholmberg/kanbanflow-mcp-server).
+MIT — see [LICENSE](LICENSE).

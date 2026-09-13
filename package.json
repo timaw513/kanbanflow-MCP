@@ -29,15 +29,15 @@
         "productivity",
         "task-management"
     ],
-    "author": "William Holmberg",
+    "author": "Tim Williams",
     "license": "MIT",
     "repository": {
         "type": "git",
-        "url": "https://github.com/williamavholmberg/kanbanflow-mcp-server"
+        "url": "https://github.com/timaw513/kanbanflow-MCP"
     },
-    "homepage": "https://github.com/williamavholmberg/kanbanflow-mcp-server#readme",
+    "homepage": "https://github.com/timaw513/kanbanflow-MCP#readme",
     "bugs": {
-        "url": "https://github.com/williamavholmberg/kanbanflow-mcp-server/issues"
+        "url": "https://github.com/timaw513/kanbanflow-MCP/issues"
     },
     "dependencies": {
         "@modelcontextprotocol/sdk": "^1.4.0",
